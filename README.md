@@ -1,73 +1,34 @@
-# Flu Vaccination Planning POC
+# POC – Surveillance vaccinale grippe
 
-Ce proof-of-concept démontre en deux jours une chaîne de valeur end-to-end pour anticiper la grippe saisonnière : ingestion 100 % APIs publiques, modélisation prédictive, exposé FastAPI et tableau de bord Streamlit.
+Prototype Streamlit qui illustre un outil d'aide à la décision pour suivre la couverture vaccinale contre la grippe à l'échelle des départements français.
 
-## Architecture fonctionnelle
-- **ETL** (`src/etl/`) : connecteurs Odissé (urgences & couvertures vaccinales), IAS® et IQVIA (doses & actes). Extraction via API, nettoyage minimal, enrregistrement parquet/CSV local avec cache.
-- **Features & Modèle** (`src/features/`, `src/models/`) : agrégation hebdomadaire par département, création de lags (1–4 semaines) sur volumes IQVIA, intégration signaux IAS® / urgences comme variables exogènes, entraînement GradientBoostingRegressor scikit-learn.
-- **Alerting** (`src/services/alerts.py`) : nowcast glissant sur passages urgences/SOS, détection seuils P80/P90 → badge « semaine à risque ».
-- **Allocation vaccins** (`src/services/allocation.py`) : heuristique proportionnelle aux besoins prévus avec bonus équité pour zones sous-vaccinées (< seuil couverture).
-- **API** (`src/api/main.py`) : FastAPI expose `/forecast`, `/alerts`, `/allocation`, `/health`.
-- **Dashboard** (`src/app/streamlit_app.py`) : visualisation interactive (cartes, courbes, tableaux), déclencheur recalcul modèle, export CSV allocations.
-- **Monitoring (option)** : connecteur Postgres & métriques Grafana via endpoint JSON ou BD.
+## Contenu
+- **Carte interactive** des départements (GeoJSON intégré) avec trois vues : couverture, besoins prévisionnels et activité urgences/SOS Médecins.
+- **Modèle prédictif** (régression linéaire) apprenant à partir de tendances vaccinales simulées et d'un signal IAS pour estimer les besoins en vaccins.
+- **Tableau de bord** avec KPIs synthétiques et graphiques (barplot & courbe de tendance).
+- **Jeu de données synthétique** stocké dans `data/manual/`, généré pour chaque département et plusieurs semaines.
 
-## Flux de données
-1. Ingestion hebdomadaire via `python3 -m src.etl.fetch_sample` (fallback mock si quota API dépassé).
-2. Stockage brut dans `data/raw/*.csv`, transformation dans `data/processed/*.csv`.
-3. Entraînement modèle (`python3 -m src.models.trainer`) → artefacts `models/gbm_forecast.joblib`, métriques `reports/metrics.json`.
-4. API/Streamlit consomment artefacts + features récents (`data/serving/`).
+## Prérequis
+Python 3.10+ et `pip`. Une fois le dépôt cloné :
 
-## Roadmap de réalisation (48h)
-1. **J0 matin** – Bootstrap projet, modules ETL Odissé + IAS®, pipeline features minimal, notebook exploration.
-2. **J0 après-midi** – Prototype GradientBoostingRegressor (lags + saisonnalité), script entraînement, premières métriques.
-3. **J1 matin** – Implémenter allocation heuristique & alertes, endpoints FastAPI.
-4. **J1 après-midi** – Dashboard Streamlit + packaging (Poetry ou pip), scripts Makefile.
-5. **J2** – Tests, monitoring optionnel, polish (docs, démo vidéo).
-
-## Installation rapide
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## Scripts essentiels (prévision POC)
-- `python3 starter.py` : pipeline complet (fetch → features → entraînement).
-- `python3 -m src.etl.fetch_sample` : télécharge datasets via API (fallback mock si limite atteinte).
-- `python3 -m src.features.builder` : construit le dataset features/labels.
-- `python3 -m src.models.trainer` : entraîne GradientBoostingRegressor et écrit les métriques.
-- `uvicorn src.api.main:app --reload` : lance l'API FastAPI.
-- `streamlit run src/app/streamlit_app.py` : dashboard interactif.
+## Lancer le POC
 
-## Jeux de données clés
-- **IQVIA** – distribution & actes pharmacie (API data.gouv.fr).
-- **IAS®** – indicateur avancé vaccination grippe (données hebdomadaires).
-- **Odissé** – couvertures vaccinales & passages urgences / SOS Médecins (département, région, France).
-- **INSEE** – populations départementales pour normalisations.
+```bash
+streamlit run src/app/streamlit_app.py
+```
 
-## API FastAPI
-- `GET /health` : statut.
-- `GET /forecast?horizon=4` : prévisions grippe par département (1–6 semaines).
-- `GET /alerts` : badge semaine à risque (moyenne glissante vs P80/P90 historiques).
-- `GET /allocation?total_stock=5000` : répartition heuristique des doses sur le stock fourni.
+Une interface web s'ouvre (ou `http://localhost:8501`). Utiliser la barre latérale pour basculer entre les vues.
 
-## Dashboard Streamlit
-Le front `src/app/streamlit_app.py` propose :
-- Tableau des prévisions (filtrage horizon).
-- Alertes heatmap.
-- Allocation anti-rupture avec export via `st.dataframe`.
-- Graphique historique vs prévision par département.
-- Bouton « Rafraîchir » qui rejoue ETL → features → entraînement.
+## Régénérer les données simulées (optionnel)
 
-## Prochaines étapes
-- Finaliser clients API (auth, pagination, contrôles qualité).
-- Enrichir features (météo, mobilité, densité médicale).
-- Industrialiser (schedulers, monitoring, CI/CD, traçabilité).
-- Préparer jeu de démonstration reproductible (fixtures).
+Les CSV fournis suffisent pour le POC. Pour régénérer un nouveau scénario :
 
-## Limitations actuelles
-- Données d'exemple générées localement si les quotas Odissé anonymes sont dépassés.
-- Pas encore d'intégration IQVIA/INSEE → placeholders pour la suite.
-- Absence de persistance BD / monitoring ; export JSON prêt pour Grafana/Infinity.
-- Modèle baseline (GBR) sans optimisation hyperparamètres ni backtesting temporel.
+```bash
+python3 scripts/generate_mock_data.py
+```
+
+Les fichiers sont écrasés dans `data/manual/`.

@@ -1,171 +1,307 @@
-"""Streamlit application for the flu planning POC."""
-
 from __future__ import annotations
 
 import json
-from typing import Optional
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Tuple
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-
-from src.config import DATA_DIR, PROCESSED_DATA_DIR
-from src.features.builder import build_training_dataset, DatasetPaths
-from src.models.predictor import ForecastPredictor
-from src.models.trainer import train
-from src.services.allocation import compute_allocation
-from src.services.alerts import compute_alerts
-from geopandas import GeoDataFrame, read_file
+from sklearn.linear_model import LinearRegression
 
 
-st.set_page_config(page_title="Flu Planning POC", layout="wide")
-st.title("📈 Flu Vaccination Planning – POC")
+DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "manual"
+GEOJSON_PATH = DATA_DIR / "departements.geojson"
 
 
-@st.cache_data
-def load_dataset() -> pd.DataFrame:
-    return pd.read_csv(PROCESSED_DATA_DIR / "training_dataset.csv", parse_dates=["week_start"])
+@dataclass(frozen=True)
+class PredictionPayload:
+    features: pd.DataFrame
+    predictions: pd.Series
+    model: LinearRegression
 
 
-@st.cache_resource
-def load_predictor() -> ForecastPredictor:
-    return ForecastPredictor()
+@st.cache_data(show_spinner=False)
+def load_geojson() -> Dict:
+    with GEOJSON_PATH.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
 
 
-def load_geo_data(filename: str) -> Optional[GeoDataFrame]:
-    path = DATA_DIR / "manual" / filename
-    if not path.exists():
-        return None
-    gdf = read_file(path)
-    candidate_cols = [
-        "code",
-        "code_insee",
-        "code_insee_region",
-        "code_insee_reg",
-        "code_reg",
-        "code_dep",
-        "num_dep",
-        "id",
+def _read_csv(filename: str) -> pd.DataFrame:
+    df = pd.read_csv(DATA_DIR / filename, dtype={"departement": str})
+    df["departement"] = df["departement"].str.zfill(2)
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_datasets() -> Dict[str, pd.DataFrame]:
+    return {
+        "coverage": _read_csv("coverage.csv"),
+        "distribution": _read_csv("distribution.csv"),
+        "ias": _read_csv("ias.csv"),
+        "urgences": _read_csv("urgences.csv"),
+        "vaccination_trends": _read_csv("vaccination_trends.csv"),
+    }
+
+
+def _split_week(week_str: str) -> Tuple[int, int]:
+    year, week = week_str.split("-")
+    return int(year), int(week)
+
+
+@st.cache_data(show_spinner=False)
+def build_training_frame() -> pd.DataFrame:
+    data = load_datasets()
+    vacc = data["vaccination_trends"].copy()
+    ias = data["ias"].copy()
+    urgences = data["urgences"].copy()
+
+    vacc[["year", "week_num"]] = vacc["semaine"].apply(lambda x: pd.Series(_split_week(x)))
+    vacc.sort_values(["departement", "year", "week_num"], inplace=True)
+    vacc["prev_coverage"] = vacc.groupby("departement")["couverture_vaccinale_percent"].shift(1)
+    vacc["trend"] = vacc["couverture_vaccinale_percent"] - vacc["prev_coverage"]
+
+    merged = vacc.merge(
+        ias[["departement", "semaine", "ias_signal"]],
+        on=["departement", "semaine"],
+        how="left",
+    ).merge(
+        urgences[["departement", "semaine", "urgences_grippe", "sos_medecins"]],
+        on=["departement", "semaine"],
+        how="left",
+    )
+
+    merged["activity_total"] = merged["urgences_grippe"].fillna(0) + merged["sos_medecins"].fillna(0)
+    merged["trend"] = merged["trend"].fillna(0.0)
+
+    merged["besoin_reel"] = (
+        2200
+        + (100 - merged["couverture_vaccinale_percent"]) * 38
+        + merged["ias_signal"].fillna(0) * 24
+        + merged["activity_total"] * 6.5
+        - merged["trend"] * 115
+    ).clip(lower=500)
+
+    merged.dropna(subset=["ias_signal", "prev_coverage"], inplace=True)
+    return merged
+
+
+@st.cache_resource(show_spinner=False)
+def train_predictor() -> PredictionPayload:
+    training_df = build_training_frame()
+    feature_cols = [
+        "couverture_vaccinale_percent",
+        "trend",
+        "ias_signal",
+        "activity_total",
     ]
-    for col in candidate_cols:
-        if col in gdf.columns:
-            gdf["code"] = gdf[col]
-            break
-    if "code" not in gdf.columns:
-        return None
-    gdf["code"] = gdf["code"].astype(str).str.zfill(2)
-    return gdf
+    model = LinearRegression()
+    model.fit(training_df[feature_cols], training_df["besoin_reel"])
+    training_df["prediction"] = model.predict(training_df[feature_cols])
 
-
-def refresh_pipeline() -> None:
-    with st.spinner("Refreshing data, features, and model…"):
-        from src.etl.fetch_sample import main as fetch_sample_main
-
-        fetch_sample_main()
-        build_training_dataset(DatasetPaths())
-        train()
-        load_dataset.clear()
-        load_predictor.clear()
-
-
-with st.sidebar:
-    st.header("Actions")
-    if st.button("🔄 Rafraîchir les données"):
-        refresh_pipeline()
-        st.success("Pipeline recalculé !")
-        st.experimental_rerun()
-
-    horizon = st.slider("Horizon de prévision (semaines)", 1, 6, 4)
-    total_stock = st.number_input("Stock global (doses)", min_value=0, value=5000, step=500)
-
-
-dataset = load_dataset()
-predictor = load_predictor()
-
-st.subheader("Prévisions de passages grippe (1–6 semaines)")
-forecasts = predictor.forecast(horizon=horizon)
-st.dataframe(forecasts)
-
-st.subheader("Alertes actuelles (badge semaine à risque)")
-alerts = compute_alerts(dataset)
-alerts_df = pd.DataFrame(alerts)
-if alerts_df.empty:
-    st.info("Pas d'alertes disponibles – lancer un rafraîchissement.")
-else:
-    st.dataframe(alerts_df)
-
-st.subheader("Allocation anti-rupture (heuristique)")
-coverage_latest = (
-    dataset.sort_values("week_start")
-    .groupby("dep_code")
-    .tail(1)[["dep_code", "coverage_rate"]]
-)
-allocation = compute_allocation(
-    forecasts=forecasts,
-    coverage=coverage_latest,
-    total_stock=float(total_stock),
-)
-st.dataframe(pd.DataFrame(allocation))
-
-st.subheader("Visualisation")
-selected_dep = st.selectbox("Département", sorted(dataset["dep_code"].unique()))
-hist = dataset[dataset["dep_code"] == selected_dep].copy()
-hist = hist.sort_values("week_start").tail(52)
-hist["type"] = "Historique"
-forecast_dep = forecasts[forecasts["dep_code"] == selected_dep].copy()
-forecast_dep["type"] = "Prévision"
-forecast_dep = forecast_dep.rename(columns={"prediction": "y"})
-merged = pd.concat(
-    [
-        hist[["week_start", "y", "type"]],
-        forecast_dep[["week_start", "y", "type"]],
-    ],
-    ignore_index=True,
-)
-merged = merged.sort_values("week_start")
-st.line_chart(
-    merged,
-    x="week_start",
-    y="y",
-    color="type",
-)
-
-st.caption(
-    "Pipeline : ETL APIs → features (lags/saisonnalité) → GradientBoostingRegressor → API FastAPI → Dashboard Streamlit."
-)
-
-st.subheader("Carte France – Prévisions hebdomadaires")
-choropleth_df = forecasts.groupby("dep_code", as_index=False)["prediction"].mean()
-choropleth_df["dep_code"] = choropleth_df["dep_code"].astype(str).str.zfill(2)
-nb_codes = choropleth_df["dep_code"].nunique()
-
-if nb_codes > 20:
-    geo_gdf = load_geo_data("departements.geojson")
-    map_label = "Prévision moyenne (passages grippe) – départements"
-else:
-    geo_gdf = load_geo_data("regions.geojson")
-    map_label = "Prévision moyenne (passages grippe) – régions"
-
-if geo_gdf is None:
-    st.info(
-        "Ajoute un GeoJSON utilisable (e.g. `departements.geojson` ou `regions.geojson`) "
-        "dans `data/manual/` pour afficher la carte choroplèthe."
+    return PredictionPayload(
+        features=training_df,
+        predictions=training_df["prediction"],
+        model=model,
     )
-else:
-    merged = geo_gdf.merge(
-        choropleth_df, left_on="code", right_on="dep_code", how="left"
+
+
+def compute_latest_metrics() -> pd.DataFrame:
+    data = load_datasets()
+    distribution = data["distribution"].copy()
+    ias = data["ias"].copy()
+    urgences = data["urgences"].copy()
+    trends = data["vaccination_trends"].copy()
+
+    distribution[["year", "week_num"]] = distribution["semaine"].apply(lambda x: pd.Series(_split_week(x)))
+    latest_year, latest_week = distribution.sort_values(["year", "week_num"]).iloc[-1][["year", "week_num"]]
+    latest_week_str = f"{latest_year}-{latest_week:02d}"
+
+    latest_dist = distribution.loc[
+        (distribution["year"] == latest_year) & (distribution["week_num"] == latest_week)
+    ]
+    latest_ias = ias[ias["semaine"] == latest_week_str]
+    latest_urg = urgences[urgences["semaine"] == latest_week_str]
+
+    latest_trend = trends[trends["semaine"] == latest_week_str].copy()
+    prev_trend = trends[trends["semaine"] < latest_week_str].sort_values(["departement", "semaine"])
+    prev_values = prev_trend.groupby("departement").tail(1)[["departement", "couverture_vaccinale_percent"]]
+    prev_values = prev_values.rename(columns={"couverture_vaccinale_percent": "coverage_prev"})
+
+    latest_trend = latest_trend.merge(prev_values, on="departement", how="left")
+    latest_trend["trend"] = latest_trend["couverture_vaccinale_percent"] - latest_trend["coverage_prev"]
+
+    predictor = train_predictor()
+    feature_cols = [
+        "couverture_vaccinale_percent",
+        "trend",
+        "ias_signal",
+        "activity_total",
+    ]
+
+    latest_features = latest_trend.merge(
+        latest_ias[["departement", "ias_signal"]],
+        on="departement",
+        how="left",
+    ).merge(
+        latest_urg[["departement", "urgences_grippe", "sos_medecins"]],
+        on="departement",
+        how="left",
     )
-    geojson = json.loads(merged.to_json())
-    fig = px.choropleth(
-        merged,
+    latest_features["activity_total"] = (
+        latest_features["urgences_grippe"].fillna(0) + latest_features["sos_medecins"].fillna(0)
+    )
+    latest_features["trend"] = latest_features["trend"].fillna(0.0)
+
+    predicted_needs = predictor.model.predict(latest_features[feature_cols].fillna(0))
+    latest_features["besoin_prevu"] = np.round(predicted_needs, 0)
+
+    latest_combined = latest_features.merge(
+        latest_dist[["departement", "doses_distribuees", "actes_pharmacie"]],
+        on="departement",
+        how="left",
+    )
+
+    latest_combined["semaine"] = latest_week_str
+    return latest_combined
+
+
+def build_map(df: pd.DataFrame, geojson: Dict, view: str) -> px.choropleth_mapbox:
+    color_column = {
+        "Vaccination": "couverture_vaccinale_percent",
+        "Distribution": "besoin_prevu",
+        "Urgences": "activity_total",
+    }[view]
+
+    color_title = {
+        "Vaccination": "Taux de couverture (%)",
+        "Distribution": "Besoin vaccinal prévu",
+        "Urgences": "Activité grippe (urgences + SOS)",
+    }[view]
+
+    hover_data = {
+        "departement": True,
+        "nom": True,
+        "couverture_vaccinale_percent": ":.1f",
+        "besoin_prevu": ":,.0f",
+        "doses_distribuees": ":,",
+        "actes_pharmacie": ":,",
+        "urgences_grippe": ":,",
+        "sos_medecins": ":,",
+        "activity_total": ":,",
+    }
+
+    fig = px.choropleth_mapbox(
+        df,
         geojson=geojson,
-        locations="code",
+        locations="departement",
         featureidkey="properties.code",
-        color="prediction",
-        color_continuous_scale="Reds",
-        labels={"prediction": "Prévision"},
-        title=map_label,
+        color=color_column,
+        color_continuous_scale="YlGnBu" if view == "Vaccination" else "OrRd",
+        hover_name="nom",
+        hover_data=hover_data,
+        mapbox_style="carto-positron",
+        center={"lat": 46.6, "lon": 1.9},
+        zoom=4.7,
+        opacity=0.75,
+        labels={color_column: color_title},
     )
-    fig.update_geos(fitbounds="locations", visible=False)
-    fig.update_layout(margin={"r": 0, "t": 50, "l": 0, "b": 0})
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(margin={"r": 0, "t": 0, "l": 0, "b": 0})
+    return fig
+
+
+def kpi_cards(df: pd.DataFrame) -> None:
+    mean_coverage = df["couverture_vaccinale_percent"].mean()
+    under_vaccinated = df[df["couverture_vaccinale_percent"] < 45]
+    total_predicted = df["besoin_prevu"].sum()
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Taux moyen de couverture", f"{mean_coverage:.1f} %")
+    col2.metric("Départements sous-vaccinés", f"{len(under_vaccinated)}")
+    col3.metric("Total doses prévues", f"{int(total_predicted):,}".replace(",", " "))
+
+    if len(under_vaccinated) > 0:
+        st.caption(
+            "Sous-vaccinés: "
+            + ", ".join(sorted(set(under_vaccinated["nom"].tolist()), key=lambda x: x))
+        )
+
+
+def render_graphs(df: pd.DataFrame) -> None:
+    hosp_fig = px.bar(
+        df.sort_values("activity_total", ascending=False).head(15),
+        x="nom",
+        y="activity_total",
+        labels={"nom": "Département", "activity_total": "Urgences + SOS (hebdo)"},
+        title="Activité grippe (Top 15 départements)",
+        color="activity_total",
+        color_continuous_scale="Reds",
+    )
+    hosp_fig.update_layout(xaxis_tickangle=-45, coloraxis_showscale=False, height=420)
+
+    coverage_fig = px.line(
+        build_training_frame()
+        .groupby(["semaine"])
+        .agg(couverture_moyenne=("couverture_vaccinale_percent", "mean"))
+        .reset_index(),
+        x="semaine",
+        y="couverture_moyenne",
+        markers=True,
+        labels={"semaine": "Semaine", "couverture_moyenne": "Couverture moyenne (%)"},
+        title="Tendance hebdomadaire de la couverture vaccinale",
+    )
+    coverage_fig.update_layout(height=320)
+
+    st.plotly_chart(hosp_fig, use_container_width=True)
+    st.plotly_chart(coverage_fig, use_container_width=True)
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Surveillance vaccinale grippe - POC",
+        layout="wide",
+        page_icon="💉",
+    )
+
+    st.title("POC - Vaccination grippe en France")
+    st.caption(
+        "Prototype interactif : couverture vaccinale, besoins prévisionnels et activité sanitaire."
+    )
+
+    data = compute_latest_metrics()
+    data["activity_total"] = data["activity_total"].fillna(
+        data["urgences_grippe"].fillna(0) + data["sos_medecins"].fillna(0)
+    )
+    geojson = load_geojson()
+
+    with st.sidebar:
+        st.header("Paramètres")
+        view = st.radio(
+            "Vue à afficher",
+            ["Vaccination", "Distribution", "Urgences"],
+            index=0,
+        )
+        st.write(
+            "Infobulle: % du vaccin, besoins prévus, activité SOS/urgences et distribution pharmaceutique."
+        )
+
+    kpi_cards(data)
+    st.plotly_chart(build_map(data, geojson, view), use_container_width=True)
+
+    st.subheader("Analyses complémentaires")
+    render_graphs(data)
+
+    st.markdown(
+        """
+        ### Observations
+        - Les départements à faible couverture vaccinale ressortent en priorité pour le renforcement des campagnes.
+        - Le modèle prédictif anticipe les besoins en croisant tendances vaccinales et signal IAS.
+        - Les pics d'activité SOS Médecins/urgences guident la priorisation logistique.
+        """
+    )
+
+
+if __name__ == "__main__":
+    main()
