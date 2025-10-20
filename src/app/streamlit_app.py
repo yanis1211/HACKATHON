@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from typing import Optional
+
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
-from src.config import PROCESSED_DATA_DIR
+from src.config import DATA_DIR, PROCESSED_DATA_DIR
 from src.features.builder import build_training_dataset, DatasetPaths
 from src.models.predictor import ForecastPredictor
 from src.models.trainer import train
 from src.services.allocation import compute_allocation
 from src.services.alerts import compute_alerts
+from geopandas import GeoDataFrame, read_file
 
 
 st.set_page_config(page_title="Flu Planning POC", layout="wide")
@@ -25,6 +30,31 @@ def load_dataset() -> pd.DataFrame:
 @st.cache_resource
 def load_predictor() -> ForecastPredictor:
     return ForecastPredictor()
+
+
+def load_geo_data(filename: str) -> Optional[GeoDataFrame]:
+    path = DATA_DIR / "manual" / filename
+    if not path.exists():
+        return None
+    gdf = read_file(path)
+    candidate_cols = [
+        "code",
+        "code_insee",
+        "code_insee_region",
+        "code_insee_reg",
+        "code_reg",
+        "code_dep",
+        "num_dep",
+        "id",
+    ]
+    for col in candidate_cols:
+        if col in gdf.columns:
+            gdf["code"] = gdf[col]
+            break
+    if "code" not in gdf.columns:
+        return None
+    gdf["code"] = gdf["code"].astype(str).str.zfill(2)
+    return gdf
 
 
 def refresh_pipeline() -> None:
@@ -103,3 +133,39 @@ st.line_chart(
 st.caption(
     "Pipeline : ETL APIs → features (lags/saisonnalité) → GradientBoostingRegressor → API FastAPI → Dashboard Streamlit."
 )
+
+st.subheader("Carte France – Prévisions hebdomadaires")
+choropleth_df = forecasts.groupby("dep_code", as_index=False)["prediction"].mean()
+choropleth_df["dep_code"] = choropleth_df["dep_code"].astype(str).str.zfill(2)
+nb_codes = choropleth_df["dep_code"].nunique()
+
+if nb_codes > 20:
+    geo_gdf = load_geo_data("departements.geojson")
+    map_label = "Prévision moyenne (passages grippe) – départements"
+else:
+    geo_gdf = load_geo_data("regions.geojson")
+    map_label = "Prévision moyenne (passages grippe) – régions"
+
+if geo_gdf is None:
+    st.info(
+        "Ajoute un GeoJSON utilisable (e.g. `departements.geojson` ou `regions.geojson`) "
+        "dans `data/manual/` pour afficher la carte choroplèthe."
+    )
+else:
+    merged = geo_gdf.merge(
+        choropleth_df, left_on="code", right_on="dep_code", how="left"
+    )
+    geojson = json.loads(merged.to_json())
+    fig = px.choropleth(
+        merged,
+        geojson=geojson,
+        locations="code",
+        featureidkey="properties.code",
+        color="prediction",
+        color_continuous_scale="Reds",
+        labels={"prediction": "Prévision"},
+        title=map_label,
+    )
+    fig.update_geos(fitbounds="locations", visible=False)
+    fig.update_layout(margin={"r": 0, "t": 50, "l": 0, "b": 0})
+    st.plotly_chart(fig, use_container_width=True)
