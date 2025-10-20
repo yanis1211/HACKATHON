@@ -1,0 +1,1 @@
+"""Hackathon flu planning package."""
