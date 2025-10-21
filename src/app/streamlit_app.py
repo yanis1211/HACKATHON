@@ -125,6 +125,12 @@ def render_month_calendar(historical: list[str], future: list[str], selected_mon
     st.dataframe(calendar_df, hide_index=True, use_container_width=True)
 
 
+def render_parameter_legend(coverage_target_pct: float, season_uplift_pct: float, ias_coef: float) -> None:
+    st.markdown(
+        f"**Paramètres actifs** · Cible couverture : {coverage_target_pct:.0f} % · Uplift hiver : {season_uplift_pct:.0f} % · Coefficient IAS : {ias_coef:.2f}"
+    )
+
+
 def main() -> None:
     bundle = load_data_bundle()
     if not bundle.months:
@@ -150,6 +156,7 @@ def main() -> None:
     per_dept = prediction_result.per_department.copy()
 
     render_global_kpis(per_dept, coverage_target_pct)
+    render_parameter_legend(coverage_target_pct, season_uplift_pct, ias_coef)
     render_assistant_panel(per_dept, coverage_target_pct, under_threshold_pct)
     render_month_calendar(historical_months, future_months, month)
 

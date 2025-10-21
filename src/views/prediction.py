@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from core.model import PredictionResult
@@ -66,25 +67,42 @@ def render_forecast_view(prediction: PredictionResult) -> None:
         dept_history["flux_proj"] = dept_history.get("flux_mois", 0)
     months = dept_history["mois_label"]
 
-    fig_need = px.line(
-        dept_history,
-        x="mois_label",
-        y="Besoin prédit",
-        markers=True,
-        title="Besoin vaccinal – 12 mois",
+    combo_fig = go.Figure()
+    combo_fig.add_trace(
+        go.Scatter(
+            x=dept_history["mois_label"],
+            y=dept_history["Besoin prédit"],
+            name="Besoin vaccinal (doses)",
+            mode="lines+markers",
+            line=dict(color="#1f77b4", width=3),
+        )
     )
-    fig_need.update_layout(height=320)
-    st.plotly_chart(fig_need, use_container_width=True, config={"displayModeBar": False})
-
-    fig_flux = px.line(
-        dept_history,
-        x="mois_label",
-        y="flux_proj",
-        markers=True,
-        title="Flux patients (urgences + SOS)",
+    combo_fig.add_trace(
+        go.Scatter(
+            x=dept_history["mois_label"],
+            y=dept_history["flux_proj"],
+            name="Flux patients (urgences + SOS)",
+            mode="lines+markers",
+            line=dict(color="#d62728", width=2, dash="dash"),
+            yaxis="y2",
+        )
     )
-    fig_flux.update_layout(height=320)
-    st.plotly_chart(fig_flux, use_container_width=True, config={"displayModeBar": False})
+    combo_fig.update_layout(
+        height=360,
+        xaxis=dict(title="Mois"),
+        yaxis=dict(title="Besoins (doses)"),
+        yaxis2=dict(
+            title="Flux patients",
+            overlaying="y",
+            side="right",
+            showgrid=False,
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0),
+        hovermode="x unified",
+        margin=dict(l=60, r=60, t=60, b=40),
+        title="Besoin vaccinal vs flux patients – 12 mois",
+    )
+    st.plotly_chart(combo_fig, use_container_width=True, config={"displayModeBar": False})
 
     national = prediction.national.copy()
     national = national.sort_values("mois_label").tail(12)
@@ -94,13 +112,14 @@ def render_forecast_view(prediction: PredictionResult) -> None:
         y="besoin_total",
         markers=True,
         title="Besoin national (12 mois)",
+        labels={"mois_label": "Mois", "besoin_total": "Doses"},
     )
-    national_fig.update_layout(height=280)
+    national_fig.update_layout(height=280, hovermode="x unified")
     st.plotly_chart(national_fig, use_container_width=True, config={"displayModeBar": False})
 
     st.caption(
-        "Hypothèses : moyenne mobile 3 mois, correction IAS (k = {:.2f}) et uplift saison ({}%). "
-        "Action : planifier les doses et renforts avant l’hiver.".format(
+        "Comment lire : courbe bleue = besoin en vaccins (doses), courbe rouge = flux patients. "
+        "Hypothèses : moyenne mobile 3 mois, IAS k = {:.2f}, uplift hiver {} %. Action : planifier les doses et renforts avant l’hiver.".format(
             prediction.ias_coef,
             prediction.season_uplift_pct,
         )
