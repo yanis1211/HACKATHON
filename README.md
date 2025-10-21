@@ -71,7 +71,7 @@ Chaque fichier peut être collé manuellement depuis Excel / CSV. Les noms de co
    - `confidence` = élevée ≥ 9 mois d’historique, moyenne 5–8, faible sinon.
 3. **Prévision** : moyenne mobile 3 mois + tendance + corrections (IAS, uplift hiver).
 
-## 7. Modèle “juste ce qu’il faut”
+## 7. Modèle
 
 ### 7.1 Besoin vaccinal (par département × mois)
 
