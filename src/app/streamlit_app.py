@@ -13,6 +13,11 @@ import streamlit as st
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 
+try:
+    from suggestions import annotate_with_suggestions
+except ImportError:  # pragma: no cover
+    from .suggestions import annotate_with_suggestions  # type: ignore
+
 
 APP_DIR = Path(__file__).resolve().parent
 CANDIDATES = [
@@ -397,42 +402,132 @@ def kpi_header(df: pd.DataFrame, under_threshold: int, selected_week: str, r2_va
     st.caption(caption + f" • Source données : {LOCAL_DATA}")
     if not under.empty:
         st.caption(
-            "Sous-vaccination (<{} %) : {}".format(
+            "Sous-vaccination (<{} %) : {}".format(
                 under_threshold,
                 ", ".join(sorted(under["nom"].dropna().astype(str).unique())),
             )
         )
 
 
+def render_decision_support(df: pd.DataFrame, coverage_target: float, under_threshold: int, selected_week: str) -> None:
+    st.subheader("Assistant décisionnel VaxiScope")
+    if df.empty:
+        st.info("Les recommandations apparaîtront dès que les données hebdomadaires seront disponibles.")
+        return
+
+    work = df.copy()
+    risk_weights = {"élevé": 2, "modéré": 1, "faible": 0}
+    work["risk_weight"] = work["risk_level"].map(risk_weights).fillna(0)
+    work["logistic_gap"] = work["besoin_prevu"].fillna(0) - work["doses_distribuees"].fillna(0)
+    work["coverage_gap"] = coverage_target * 100 - work["couverture_vaccinale_percent"].fillna(0)
+
+    top_priority = work.sort_values(["risk_weight", "risk_score"], ascending=[False, False]).head(3)
+    top_logistics = work[work["logistic_gap"] > 250].sort_values("logistic_gap", ascending=False).head(3)
+    top_campaign = work[work["coverage_gap"] > 0].sort_values("coverage_gap", ascending=False).head(3)
+
+    cols = st.columns(3)
+
+    def render_list(target_df: pd.DataFrame, container, empty_message: str, formatter) -> None:
+        with container:
+            if target_df.empty:
+                st.write(empty_message)
+            else:
+                lines = [formatter(row) for _, row in target_df.iterrows()]
+                st.markdown("\n".join(f"- {line}" for line in lines))
+
+    render_list(
+        top_priority,
+        cols[0],
+        "Situation maîtrisée.",
+        lambda row: (
+            f"**{row['nom']}** — {row['suggestion']} (risque {row['risk_level']}, couverture {row['couverture_vaccinale_percent']:.1f}%)"
+        ),
+    )
+    cols[0].caption("Priorité : risque sanitaire")
+
+    render_list(
+        top_logistics,
+        cols[1],
+        "Distribution conforme aux besoins.",
+        lambda row: (
+            f"**{row['nom']}** — +{fmt_int(row['logistic_gap'])} doses à couvrir (distribution actuelle {fmt_int(row['doses_distribuees'])})"
+        ),
+    )
+    cols[1].caption("Priorité : logistique & stocks")
+
+    render_list(
+        top_campaign,
+        cols[2],
+        "Couverture alignée sur la cible.",
+        lambda row: (
+            f"**{row['nom']}** — campagne à intensifier (gap {max(row['coverage_gap'],0):.1f} pts)"
+        ),
+    )
+    cols[2].caption("Priorité : campagne vaccinale")
+
+    st.caption(f"Semaine {selected_week} – recommandations générées automatiquement par le modèle.")
+
+
 def build_map(df: pd.DataFrame, geojson: dict, metric: str, palette: str, title: str) -> px.choropleth_mapbox:
     scale = palette if palette else PALETTES.get(metric, "Viridis")
-    hover_data = {
-        "departement": True,
-        "nom": True,
-        "couverture_vaccinale_percent": ":.1f",
-        "besoin_prevu": ":,.0f",
-        "doses_distribuees": ":,",
-        "actes_pharmacie": ":,",
-        "urgences_grippe": ":,",
-        "sos_medecins": ":,",
-        "activity_total": ":,",
-        "risk_level": True,
-    }
+    display_df = df.copy()
+    columns = [
+        "nom",
+        "couverture_vaccinale_percent",
+        "besoin_prevu",
+        "activity_total",
+        "doses_distribuees",
+        "actes_pharmacie",
+        "risk_level",
+        "suggestion",
+    ]
+    for col in columns:
+        if col not in display_df.columns:
+            display_df[col] = np.nan
+    display_df["couverture_vaccinale_percent"] = display_df["couverture_vaccinale_percent"].fillna(0)
+    display_df["besoin_prevu"] = display_df["besoin_prevu"].fillna(0)
+    display_df["activity_total"] = display_df["activity_total"].fillna(0)
+    display_df["doses_distribuees"] = display_df["doses_distribuees"].fillna(0)
+    display_df["actes_pharmacie"] = display_df["actes_pharmacie"].fillna(0)
+    display_df["risk_level"] = display_df["risk_level"].fillna("non défini")
+    display_df["suggestion"] = display_df["suggestion"].fillna("Maintenir le suivi.")
+
+    primary_line = {
+        "couverture_vaccinale_percent": "Couverture : %{z:.1f} %",
+        "besoin_prevu": "Besoins estimés : %{z:,.0f} doses",
+        "activity_total": "Urgences + SOS : %{z:,.0f}",
+        "risk_score": "Score de risque : %{z:.2f}",
+    }.get(metric, f"{title} : %{{z}}")
+
+    hovertemplate = (
+        "<b>%{customdata[0]}</b> • %{location}<br>"
+        f"{primary_line}<br>"
+        "Couverture : %{customdata[1]:.1f} %<br>"
+        "Besoins (doses) : %{customdata[2]:,.0f}<br>"
+        "Doses distribuées : %{customdata[4]:,.0f}<br>"
+        "Urgences + SOS : %{customdata[3]:,.0f}<br>"
+        "Actes pharmacie : %{customdata[5]:,.0f}<br>"
+        "Risque : %{customdata[6]}<br>"
+        "Suggestion : %{customdata[7]}<extra></extra>"
+    )
+
     fig = px.choropleth_mapbox(
-        df,
+        display_df,
         geojson=geojson,
         locations="departement",
         featureidkey="properties.code",
         color=metric,
         color_continuous_scale=scale,
         hover_name="nom",
-        hover_data=hover_data,
+        hover_data=None,
+        custom_data=display_df[columns],
         mapbox_style="carto-positron",
         center={"lat": 46.6, "lon": 1.9},
         zoom=4.7,
         opacity=0.82,
         labels={metric: title},
     )
+    fig.update_traces(hovertemplate=hovertemplate)
     fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), coloraxis_colorbar=dict(title=title))
     return fig
 
@@ -506,7 +601,7 @@ def render_logistics_tab(latest_df: pd.DataFrame) -> None:
             st.dataframe(plan, use_container_width=True, hide_index=True)
             download_button("⬇️ Exporter la redistribution", plan, f"redistribution_{latest_df['semaine'].iloc[0]}.csv")
     download_button("⬇️ Exporter la logistique", latest_df[
-        ["departement", "nom", "semaine", "doses_distribuees", "actes_pharmacie", "besoin_prevu", "risk_level"]
+        ["departement", "nom", "semaine", "doses_distribuees", "actes_pharmacie", "besoin_prevu", "risk_level", "suggestion"]
     ], f"logistique_{latest_df['semaine'].iloc[0]}.csv")
 
 
@@ -538,7 +633,7 @@ def render_health_tab(latest_df: pd.DataFrame, geojson: dict, palette: str) -> N
         else:
             st.info("Signal IAS indisponible pour la semaine analysée.")
     download_button("⬇️ Exporter les indicateurs sanitaires", latest_df[
-        ["departement", "nom", "semaine", "ias_signal", "urgences_grippe", "sos_medecins", "activity_total"]
+        ["departement", "nom", "semaine", "ias_signal", "urgences_grippe", "sos_medecins", "activity_total", "suggestion"]
     ], f"sante_{latest_df['semaine'].iloc[0]}.csv")
 
 
@@ -576,6 +671,7 @@ def render_targeting_tab(latest_df: pd.DataFrame, geojson: dict, palette: str, u
             "risk_score",
             "sous_vaccination",
             "priorite",
+            "suggestion",
         ]
     ].sort_values(["priorite", "risk_score"], ascending=[True, False])
     if focus.empty:
@@ -620,8 +716,14 @@ def main() -> None:
     bundle = train_predictor(train_df)
     latest_df = build_latest_frame(data, controls["week"])
     latest_df = predict_needs(latest_df, bundle, controls["coverage_target"])
+    latest_df = annotate_with_suggestions(
+        latest_df,
+        coverage_target=controls["coverage_target"],
+        under_threshold=controls["under_threshold"],
+    )
 
     kpi_header(latest_df, controls["under_threshold"], controls["week"], bundle.r2 if bundle else None)
+    render_decision_support(latest_df, controls["coverage_target"], controls["under_threshold"], controls["week"])
 
     tabs = st.tabs(["🧠 Prédiction", "🚚 Logistique", "🏥 Urgences & IAS", "🎯 Ciblage territorial"])
     with tabs[0]:
