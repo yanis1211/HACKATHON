@@ -1,14 +1,21 @@
 # POC – Surveillance vaccinale grippe
 
-Prototype Streamlit qui illustre un outil d'aide à la décision pour suivre la couverture vaccinale contre la grippe à l'échelle des départements français.
+VaxiScope est un assistant décisionnel Streamlit pour piloter la vaccination antigrippale : il consolide les données hebdomadaires (couverture, IAS, urgences, distribution, météo) et fournit une prévision de besoins, des alertes logistiques et sanitaires, ainsi qu’un ciblage territorial.
 
-## Contenu
-- **Carte interactive** des départements (GeoJSON intégré) avec trois vues : couverture, besoins prévisionnels et activité urgences/SOS Médecins.
-- **Modèle prédictif** (régression linéaire) apprenant à partir de tendances vaccinales simulées et d'un signal IAS pour estimer les besoins en vaccins.
-- **Tableau de bord** avec KPIs synthétiques et graphiques (barplot & courbe de tendance).
-- **Jeu de données synthétique** stocké dans `data/manual/`, généré pour chaque département et plusieurs semaines.
+## Vues métier
+- **🗺️ Carte** : choroplèthe unique (toggle Couverture / Besoin), légende rouge‑orange‑vert, infobulle synthétique.
+- **📈 Prévisions vaccins** : sélection d’un département → courbe besoins sur 12 mois, flux patients projetés, encadré « Besoin / Confiance ».
+- **🚚 Distribution** : saisie du stock national + cible de couverture → bouton « Calculer l’allocation » (répartition proportionnelle), export CSV et note d’action.
+- **ℹ️ Notes** : rappel des hypothèses (coeff IAS, uplift hiver, méthode d’allocation).
 
-## Prérequis
+## Modèles simplifiés (POC)
+- **Besoin vaccinal** : moyenne mobile (3 mois) de la couverture, ajustée par le signal IAS (coeff. doux 0–0,3) et un uplift hiver paramétrable (0–30 % sur nov.–févr.). Formule affichée dans l’UI.
+- **Urgences/SOS** : tendance glissante sur les 12 derniers mois (fallback si historique < 6 mois, badge de confiance dans l’UI).
+- **Allocation** : heuristique proportionnelle (besoin_dpt / somme(besoins)) avec plafonnement automatique pour les départements déjà ≥ cible.
+
+Toutes les hypothèses sont affichées dans l’UI ; aucune boîte noire. Les départements 971‑973 restent regroupés pour lisibilité Antilles‑Guyane.
+
+## Installation
 Python 3.10+ et `pip`. Une fois le dépôt cloné :
 
 ```bash
@@ -21,14 +28,27 @@ pip install -r requirements.txt
 streamlit run src/app/streamlit_app.py
 ```
 
-Une interface web s'ouvre (ou `http://localhost:8501`). Utiliser la barre latérale pour basculer entre les vues.
+L’application s’ouvre sur `http://localhost:8501`. La barre latérale permet de sélectionner le mois, la cible de couverture, l’uplift hiver et le coefficient IAS.
 
-## Régénérer les données simulées (optionnel)
+## Jeux de données attendus
 
-Les CSV fournis suffisent pour le POC. Pour régénérer un nouveau scénario :
+Les fichiers sont lus dans `data/manual/`. S’ils sont absents, le loader génère automatiquement des données simulées (mock) pour conserver une démonstration fonctionnelle.
 
-```bash
-python3 scripts/generate_mock_data.py
-```
+- `departements.geojson` — `properties.code` (INSEE) + `properties.nom`.
+- `vaccination_trends.csv` — `departement`, `semaine` (YYYY-ww), `nom` (optionnel), `couverture_vaccinale_percent`.
+- `ias.csv` — `departement`, `semaine`, `ias_signal`.
+- `urgences.csv` — `departement`, `semaine`, `urgences_grippe`, `sos_medecins`.
+- `distribution.csv` — `departement`, `semaine`, `doses_distribuees`, `actes_pharmacie`.
+- `coverage.csv` (fallback) — dernières valeurs de couverture (facultatif si `vaccination_trends` complet).
+- `meteo.csv` (optionnel) — `departement`, `semaine`, `temp_moy`, `temp_min`, `humidite`, `precipitations`, `anomalie_temp`.
 
-Les fichiers sont écrasés dans `data/manual/`.
+Grain pivot : `departement` (chaîne INSEE) × `semaine` (ISO). Les vues agrègent ensuite au mois (`YYYY-MM`) avec :
+
+- `activity_total = urgences_grippe + sos_medecins`
+- `trend_cov` (moyenne mobile 3 semaines)
+- `besoin_prevu` (formule explicite : cible – doses estimées)
+- `risk_level` (`rouge`, `orange`, `vert` selon couverture)
+
+## Générer des données de démonstration
+
+Le moteur charge automatiquement des mocks si un fichier est manquant. Pour créer manuellement des CSV, vous pouvez vous inspirer de `scripts/generate_mock_data.py` ou déposer vos propres extractions dans `data/manual/` en respectant les schémas ci-dessus.
