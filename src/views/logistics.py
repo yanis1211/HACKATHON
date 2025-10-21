@@ -25,12 +25,21 @@ def render_distribution_view(prediction: PredictionResult, default_stock: int) -
         stock_input = st.number_input("Stock national disponible", min_value=0, value=int(default_stock), step=1000)
     with col2:
         cible_input = st.slider("Couverture visée (%)", min_value=50, max_value=90, value=int(prediction.coverage_target_pct), step=1)
+        st.caption("Plafonnement automatique des départements déjà ≥ cible.")
 
     if st.button("Calculer l'allocation"):
         plan = allocation_plan(prediction, stock_input, cible_input)
         if plan.empty:
             st.success("Aucun besoin de redistribution détecté.")
         else:
+            if "is_future" in df.columns:
+                plan = plan.merge(
+                    df[["departement", "is_future"]],
+                    on="departement",
+                    how="left",
+                )
+                plan["type"] = plan["is_future"].map({True: "Prévision", False: "Historique"})
+                plan.drop(columns=["is_future"], inplace=True)
             st.dataframe(plan, use_container_width=True, hide_index=True)
             download_button("⬇️ Exporter l'allocation", plan, f"allocation_{prediction.month}.csv")
         st.caption("Action : redistribuer les doses avant saturation des zones rouges.")

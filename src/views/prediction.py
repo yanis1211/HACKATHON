@@ -25,6 +25,10 @@ def render_map(prediction: PredictionResult, geojson: dict) -> None:
     metric = "couverture_mois" if layer_choice.startswith("Couverture") else "besoin_prevu"
     title = "Couverture vaccinale (%)" if metric == "couverture_mois" else "Besoin prédit (doses)"
 
+    df = df.copy()
+    if "is_future" in df.columns:
+        df.loc[df["is_future"], "nom"] = df.loc[df["is_future"], "nom"] + " (prévision)"
+
     fig = choropleth_map(df, geojson, metric, title, palette="YlGnBu" if metric == "couverture_mois" else "YlOrRd")
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 

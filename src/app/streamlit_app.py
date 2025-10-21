@@ -114,15 +114,9 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Paramètres")
-        st.caption("📆 Choisissez un mois via le calendrier")
-        default_date = pd.to_datetime(month_options[-1] + "-01").date()
-        selected_date = st.date_input(
-            "Mois",
-            value=default_date,
-            min_value=min_date,
-            max_value=max_date,
-        )
-        month = f"{selected_date.year}-{selected_date.month:02d}"
+        st.caption("📆 Choisissez le mois à analyser")
+        month_choice = st.selectbox("Mois", month_options, index=len(month_options) - 1)
+        month = month_choice
         coverage_target_pct = st.slider("Cible de couverture (%)", min_value=40, max_value=85, value=60, step=1)
         st.caption("Taux souhaité pour la population cible.")
         under_threshold_pct = st.slider("Seuil sous-vaccination (%)", min_value=30, max_value=70, value=45, step=1)

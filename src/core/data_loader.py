@@ -17,6 +17,25 @@ DATA_DIR = ROOT_DIR / "data" / "manual"
 
 CSV_DATASETS = ["vaccination_trends", "ias", "urgences", "distribution", "coverage", "meteo"]
 
+EXCLUDED_PREFIXES = ("97", "98")
+
+
+def _filter_metropolitan_pairs(pairs: Iterable[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    filtered = []
+    for code, name in pairs:
+        code_str = str(code).strip().upper()
+        if code_str.startswith(EXCLUDED_PREFIXES):
+            continue
+        filtered.append((code_str, name))
+    return filtered
+
+
+def _filter_metropolitan_df(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    if df is None or df.empty or "departement" not in df.columns:
+        return df
+    mask = ~df["departement"].astype(str).str.startswith(EXCLUDED_PREFIXES)
+    return df.loc[mask].copy()
+
 
 def _read_csv(path: Path) -> pd.DataFrame:
     try:
@@ -187,11 +206,13 @@ def load_data_bundle() -> DataBundle:
         df = _load_csv_dataset(name)
         if df is not None:
             df = _rename_standard_columns(name, df)
+            df = _filter_metropolitan_df(df)
         initial_frames[name] = df
 
     departements = _extract_departements_from_geojson(geojson)
     if not departements:
         departements = _extract_departements_from_frames(df for df in initial_frames.values() if df is not None)
+    departements = _filter_metropolitan_pairs(departements)
     cfg = build_config(departements=departements or None)
 
     existing_weeks: list[str] = []
@@ -388,6 +409,7 @@ def _compute_monthly_metrics(
     counts = monthly.groupby("departement")["mois"].transform("count")
     monthly["confidence"] = np.where(counts >= 9, "élevée", np.where(counts >= 5, "moyenne", "faible"))
 
+    monthly = _filter_metropolitan_df(monthly)
     return monthly
 
     weeks: List[str] = []
