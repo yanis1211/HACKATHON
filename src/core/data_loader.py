@@ -366,15 +366,24 @@ def _compute_monthly_metrics(
     monthly["couverture_mois"] = monthly["couverture_mois"].fillna(overall_cov)
     monthly["incidence_mois"] = monthly["incidence_mois"].fillna(overall_inc)
 
-    monthly["flux_mois"] = monthly["flux_mois"].fillna(0)
+    monthly["flux_mois"] = monthly["flux_mois"].fillna(0).astype(float)
+    monthly["couverture_mois"] = monthly["couverture_mois"].astype(float)
+    monthly["doses_mois"] = monthly["doses_mois"].fillna(0).astype(float)
+    monthly["actes_mois"] = monthly["actes_mois"].fillna(0).astype(float)
     monthly["population_proxy"] = monthly["population_proxy"].replace({0: 1_000})
 
     monthly["mois"] = monthly["mois"].astype(str)
     monthly["departement"] = monthly["departement"].astype(str)
 
     monthly = monthly.sort_values(["departement", "mois"]).reset_index(drop=True)
-    monthly["flux_trend"] = monthly.groupby("departement")["flux_mois"].diff().fillna(0)
-    monthly["couverture_trend"] = monthly.groupby("departement")["couverture_mois"].diff().fillna(0)
+    monthly["coverage_ma3"] = monthly.groupby("departement")["couverture_mois"].transform(
+        lambda s: s.rolling(window=3, min_periods=1).mean()
+    )
+    monthly["coverage_trend"] = monthly.groupby("departement")["coverage_ma3"].diff().fillna(0)
+    monthly["flux_ma3"] = monthly.groupby("departement")["flux_mois"].transform(
+        lambda s: s.rolling(window=3, min_periods=1).mean()
+    )
+    monthly["flux_trend"] = monthly.groupby("departement")["flux_ma3"].diff().fillna(0)
 
     counts = monthly.groupby("departement")["mois"].transform("count")
     monthly["confidence"] = np.where(counts >= 9, "élevée", np.where(counts >= 5, "moyenne", "faible"))

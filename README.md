@@ -7,6 +7,7 @@ VaxiScope est un assistant décisionnel Streamlit pour piloter la vaccination an
 - **📈 Prévisions vaccins** : sélection d’un département → courbe besoins sur 12 mois, flux patients projetés, encadré « Besoin / Confiance ».
 - **🚚 Distribution** : saisie du stock national + cible de couverture → bouton « Calculer l’allocation » (répartition proportionnelle), export CSV et note d’action.
 - **ℹ️ Notes** : rappel des hypothèses (coeff IAS, uplift hiver, méthode d’allocation).
+- Un calendrier interactif dans la barre latérale permet de choisir le mois (historique ou prévision) avant de recalculer les besoins.
 
 ## Modèles simplifiés (POC)
 - **Besoin vaccinal** : moyenne mobile (3 mois) de la couverture, ajustée par le signal IAS (coeff. doux 0–0,3) et un uplift hiver paramétrable (0–30 % sur nov.–févr.). Formule affichée dans l’UI.

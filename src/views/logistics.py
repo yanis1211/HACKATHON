@@ -14,9 +14,10 @@ def render_distribution_view(prediction: PredictionResult, default_stock: int) -
         st.warning("Données indisponibles pour cette période.")
         return
 
-    st.info(
-        "Heuristique : répartition proportionnelle aux besoins, "
-        "réduction automatique sur les départements déjà ≥ cible."
+    st.markdown(
+        "- **Comment lire :** colonne `besoin_prevu` = doses à couvrir, `allocation_proposee` = suggestion automatique.\n"
+        "- **Hypothèse :** répartition proportionnelle aux besoins, plafonnée si couverture ≥ cible.\n"
+        "- **Action :** valider / ajuster l’allocation avant la prochaine livraison."
     )
 
     col1, col2 = st.columns(2)
@@ -34,4 +35,4 @@ def render_distribution_view(prediction: PredictionResult, default_stock: int) -
             download_button("⬇️ Exporter l'allocation", plan, f"allocation_{prediction.month}.csv")
         st.caption("Action : redistribuer les doses avant saturation des zones rouges.")
     else:
-        st.caption("Renseignez le stock national puis lancez le calcul pour obtenir la proposition d’allocation.")
+        st.caption("Indiquez un stock national puis calculez l’allocation proposée.")

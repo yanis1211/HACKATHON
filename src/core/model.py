@@ -28,15 +28,16 @@ def _project_future_month(bundle: DataBundle, target_month: str, monthly: pd.Dat
     projected = last_per_dept.copy()
     projected["mois"] = target_month
     projected["month_dt"] = pd.to_datetime(f"{target_month}-01")
+    projected = projected.drop(columns=["coverage_ma3", "coverage_trend", "flux_ma3", "flux_trend"], errors="ignore")
+    projected["weeks_count"] = 0
+    projected["confidence"] = "faible"
+    projected["ias_norm"] = projected["ias_norm"].fillna(0)
     projected["couverture_mois"] = np.clip(
-        projected["couverture_mois"] + projected["couverture_trend"],
+        projected["couverture_mois"].fillna(projected["couverture_mois"].mean()),
         20,
         95,
     )
-    projected["incidence_mois"] = projected["incidence_mois"].fillna(projected["incidence_mois"].mean())
-    projected["flux_mois"] = np.clip(projected["flux_mois"] + projected["flux_trend"], 0, None)
-    projected["weeks_count"] = 0
-    projected["ias_norm"] = projected["ias_norm"].fillna(0)
+    projected["flux_mois"] = projected["flux_mois"].fillna(0)
     return projected
 
 
@@ -66,24 +67,42 @@ def predict_needs(
         future_row = _project_future_month(bundle, month, monthly)
         monthly = pd.concat([monthly, future_row], ignore_index=True)
 
+    monthly = monthly.sort_values(["departement", "month_dt"]).reset_index(drop=True)
+    monthly["coverage_ma3"] = monthly.groupby("departement")["couverture_mois"].transform(
+        lambda s: s.rolling(window=3, min_periods=1).mean()
+    )
+    monthly["coverage_trend"] = monthly.groupby("departement")["coverage_ma3"].diff().fillna(0)
+    monthly["flux_ma3"] = monthly.groupby("departement")["flux_mois"].transform(
+        lambda s: s.rolling(window=3, min_periods=1).mean()
+    )
+    monthly["flux_trend"] = monthly.groupby("departement")["flux_ma3"].diff().fillna(0)
+
     coverage_target = coverage_target_pct / 100.0
     season_factor = season_uplift_pct / 100.0
 
-    monthly["season_multiplier"] = monthly["month_dt"].apply(
-        lambda dt: season_factor if dt.month in WINTER_MONTHS else 0.0
+    monthly["season_multiplier"] = monthly["month_dt"].dt.month.apply(
+        lambda m: season_factor if m in WINTER_MONTHS else 0.0
     )
-    monthly["coverage_proj"] = np.clip(
-        monthly["couverture_mois"] + (ias_coef * monthly["ias_norm"] * 10.0),
+    future_flag = monthly["weeks_count"].fillna(0) == 0
+    monthly["is_future"] = future_flag.astype(bool)
+    coverage_projection = np.clip(
+        monthly["coverage_ma3"] + monthly["coverage_trend"] + (ias_coef * monthly["ias_norm"] * 10.0),
         0,
         95,
     )
+    monthly["coverage_used"] = monthly["couverture_mois"].where(~future_flag, coverage_projection)
+    monthly.loc[future_flag, "couverture_mois"] = monthly.loc[future_flag, "coverage_used"]
+
+    flux_projection = np.clip(monthly["flux_ma3"] + monthly["flux_trend"], 0, None)
+    monthly["flux_proj"] = monthly["flux_mois"].where(~future_flag, flux_projection)
+    monthly.loc[future_flag, "flux_mois"] = monthly.loc[future_flag, "flux_proj"]
+
     target_doses = monthly["population_proxy"] * coverage_target
-    available_doses = monthly["population_proxy"] * monthly["coverage_proj"] / 100.0
+    available_doses = monthly["population_proxy"] * monthly["coverage_used"] / 100.0
     monthly["besoin_prevu"] = np.clip((target_doses - available_doses) * (1 + monthly["season_multiplier"]), 0, None)
-    monthly["flux_proj"] = np.clip(monthly["flux_mois"] + monthly["flux_trend"].fillna(0), 0, None)
 
     monthly["risk_level"] = pd.cut(
-        monthly["couverture_mois"],
+        monthly["coverage_used"],
         bins=[-1, 60, 75, 200],
         labels=["rouge", "orange", "vert"],
     ).astype(str)

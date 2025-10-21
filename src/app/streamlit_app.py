@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Tuple
 
 import pandas as pd
@@ -35,6 +35,7 @@ def render_assistant_panel(df: pd.DataFrame, coverage_target_pct: float, under_t
     work["coverage_gap"] = coverage_target_pct - work["couverture_mois"].fillna(0)
     work["risk_flag"] = work["risk_level"].map({"rouge": 2, "orange": 1, "vert": 0}).fillna(0)
     work["priority"] = work["coverage_gap"] + work["risk_flag"] * 10
+    work["label"] = work["nom"] + work["weeks_count"].fillna(0).apply(lambda x: " (prévision)" if x == 0 else "")
 
     cols = st.columns(3)
 
@@ -46,7 +47,7 @@ def render_assistant_panel(df: pd.DataFrame, coverage_target_pct: float, under_t
         else:
             for _, row in top_priority.iterrows():
                 st.markdown(
-                    f"- **{row['nom']}** — besoin {int(row['besoin_prevu']):,} doses, couverture {row['couverture_mois']:.1f}%"
+                    f"- **{row['label']}** — besoin {int(row['besoin_prevu']):,} doses, couverture {row['couverture_mois']:.1f}%"
                 )
 
     deficits = work.copy()
@@ -61,7 +62,7 @@ def render_assistant_panel(df: pd.DataFrame, coverage_target_pct: float, under_t
             st.write("Distribution conforme aux besoins.")
         else:
             for _, row in top_deficits.iterrows():
-                st.markdown(f"- **{row['nom']}** — déficit estimé {abs(int(row['logistic_gap'])):,} doses")
+                st.markdown(f"- **{row['label']}** — déficit estimé {abs(int(row['logistic_gap'])):,} doses")
 
     under = work[work["couverture_mois"] < under_threshold_pct].sort_values("coverage_gap", ascending=False).head(3)
     with cols[2]:
@@ -72,7 +73,7 @@ def render_assistant_panel(df: pd.DataFrame, coverage_target_pct: float, under_t
             for _, row in under.iterrows():
                 gap = max(row["coverage_gap"], 0)
                 st.markdown(
-                    f"- **{row['nom']}** — cible {coverage_target_pct:.0f} %, manque {gap:.1f} pts"
+                    f"- **{row['label']}** — cible {coverage_target_pct:.0f} %, manque {gap:.1f} pts"
                 )
 
 
@@ -86,43 +87,10 @@ def render_global_kpis(df: pd.DataFrame, coverage_target_pct: float) -> None:
 
 
 def month_to_dates(month_str: str) -> Tuple[str, str]:
-    year, month = map(int, month_str.split("-"))
-    start = date(year, month, 1)
-    if month == 12:
-        next_month = date(year + 1, 1, 1)
-    else:
-        next_month = date(year, month + 1, 1)
-    end = next_month - timedelta(days=1)
+    dt = pd.to_datetime(f"{month_str}-01")
+    start = dt.date()
+    end = (dt + pd.offsets.MonthEnd(0)).date()
     return start.strftime("%d %b %Y"), end.strftime("%d %b %Y")
-
-
-def render_month_calendar(historical: list[str], future: list[str], selected_month: str) -> None:
-    calendar = []
-    for month in historical:
-        start, end = month_to_dates(month)
-        calendar.append(
-            {
-                "Mois": month,
-                "Du": start,
-                "Au": end,
-                "Type": "Historique",
-                "Sélectionné": "✅" if month == selected_month else "",
-            }
-        )
-    for month in future:
-        start, end = month_to_dates(month)
-        calendar.append(
-            {
-                "Mois": month,
-                "Du": start,
-                "Au": end,
-                "Type": "Prévision",
-                "Sélectionné": "✅" if month == selected_month else "",
-            }
-        )
-    calendar_df = pd.DataFrame(calendar)
-    st.markdown("#### Calendrier des mois (historique & prévisions)")
-    st.dataframe(calendar_df, hide_index=True, use_container_width=True)
 
 
 def render_parameter_legend(coverage_target_pct: float, season_uplift_pct: float, ias_coef: float) -> None:
@@ -140,16 +108,33 @@ def main() -> None:
     future_months = generate_future_months(bundle.months[-1], horizon=3)
     historical_months = bundle.months
     month_options = historical_months + future_months
-    labels = [month if month in historical_months else f"{month} (prévision)" for month in month_options]
+
+    min_date = pd.to_datetime(historical_months[0] + "-01").date()
+    max_date = pd.to_datetime(month_options[-1] + "-01").date()
 
     with st.sidebar:
         st.header("Paramètres")
-        selected_label = st.selectbox("Mois", options=labels, index=len(labels) - 1)
-        month = month_options[labels.index(selected_label)]
+        st.caption("📆 Choisissez un mois via le calendrier")
+        default_date = pd.to_datetime(month_options[-1] + "-01").date()
+        selected_date = st.date_input(
+            "Mois",
+            value=default_date,
+            min_value=min_date,
+            max_value=max_date,
+        )
+        month = f"{selected_date.year}-{selected_date.month:02d}"
         coverage_target_pct = st.slider("Cible de couverture (%)", min_value=40, max_value=85, value=60, step=1)
+        st.caption("Taux souhaité pour la population cible.")
         under_threshold_pct = st.slider("Seuil sous-vaccination (%)", min_value=30, max_value=70, value=45, step=1)
+        st.caption("Départements < seuil affichés en priorité.")
         season_uplift_pct = st.slider("Uplift hiver (%)", min_value=0, max_value=30, value=20, step=5)
+        st.caption("Amplification des besoins sur novembre-février.")
         ias_coef = st.slider("Coefficient IAS", min_value=0.0, max_value=0.3, value=0.15, step=0.05)
+        st.caption("Sensibilité aux signaux IAS (0 = neutre).")
+        if month in future_months:
+            st.caption("Sélection : mois prévisionnel (données simulées).")
+        else:
+            st.caption("Sélection : mois historique (données observées).")
         st.caption(f"Historique disponible : {historical_months[0]} → {historical_months[-1]}")
 
     prediction_result = predict_needs(bundle, month, coverage_target_pct, season_uplift_pct, ias_coef)
@@ -158,7 +143,6 @@ def main() -> None:
     render_global_kpis(per_dept, coverage_target_pct)
     render_parameter_legend(coverage_target_pct, season_uplift_pct, ias_coef)
     render_assistant_panel(per_dept, coverage_target_pct, under_threshold_pct)
-    render_month_calendar(historical_months, future_months, month)
 
     tabs = st.tabs(["🗺️ Carte", "📈 Prévisions", "🚚 Distribution", "ℹ️ Notes"])
 
