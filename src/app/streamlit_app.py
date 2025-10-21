@@ -11,117 +11,129 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
 
-# ============
-# CONFIG / IO
-# ============
-from pathlib import Path
 
-APP_DIR = Path(__file__).resolve().parent          # .../src/app
-# On cherche un dossier data/manual en priorité aux niveaux supérieurs
+APP_DIR = Path(__file__).resolve().parent
 CANDIDATES = [
-    APP_DIR / "data" / "manual",                   # .../src/app/data/manual
-    APP_DIR.parent / "data" / "manual",            # .../src/data/manual
-    APP_DIR.parents[1] / "data" / "manual",        # .../data/manual   <-- ton cas
-    Path.cwd() / "data" / "manual",                # ./data/manual (si tu lances depuis la racine)
+    APP_DIR / "data" / "manual",
+    APP_DIR.parent / "data" / "manual",
+    APP_DIR.parents[1] / "data" / "manual",
+    Path.cwd() / "data" / "manual",
 ]
 
-LOCAL_DATA = None
-for p in CANDIDATES:
-    if p.exists():
-        LOCAL_DATA = p.resolve()
-        break
-if LOCAL_DATA is None:
-    # par défaut, on pointe sur la racine/data/manual (même si absent, pour que l'UI propose l'upload)
-    LOCAL_DATA = (APP_DIR.parents[1] / "data" / "manual").resolve()
-
-FALLBACK_DATA = Path("/mnt/data/poc_aligned")  # optionnel (les CSV générés automatiquement)
+LOCAL_DATA = next((p.resolve() for p in CANDIDATES if p.exists()), (APP_DIR.parents[1] / "data" / "manual").resolve())
+FALLBACK_DATA = Path("/mnt/data/poc_aligned")
 REQUIRED_FILES = {
     "geojson": "departements.geojson",
     "vaccination_trends": "vaccination_trends.csv",
     "ias": "ias.csv",
     "urgences": "urgences.csv",
     "distribution": "distribution.csv",
-    "coverage": "coverage.csv",  # optionnel
+    "coverage": "coverage.csv",
 }
 
+PALETTES = {
+    "Surveillance": "YlGnBu",
+    "Besoins prévus": "YlOrRd",
+    "Urgences": "YlOrRd",
+    "Ciblage": "Rocket",
+}
+
+
 st.set_page_config(
-    page_title="POC – Carte Prédictive Vaccination Grippe",
+    page_title="Carte prédictive vaccination grippe",
     page_icon="💉",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.sidebar.caption(f"📂 Données: {LOCAL_DATA}")
+
+def render_help_sidebar() -> None:
+    with st.sidebar.expander("ℹ️ Aide rapide", expanded=False):
+        st.markdown(
+            """
+**Contrôles**
+• Semaine analysée  
+• Cible de couverture (%)  
+• Seuil sous-vaccination (%)  
+• Palette de couleurs
+
+**Légendes**
+- Surveillance : plus foncé = meilleure couverture.
+- Besoins prévus : rouge = priorité logistique.
+- Urgences : rouge = forte pression sanitaire.
+- Ciblage : rouge = zone à suivre.
+            """
+        )
 
 
-# =============
-# UTILITAIRES
-# =============
-def _mtime(p: Path) -> float:
-    return p.stat().st_mtime if p.exists() else 0.0
+@dataclass(frozen=True)
+class PredBundle:
+    model: LinearRegression
+    features: List[str]
+    r2: float
 
 
-def _split_week(week_str: str) -> Tuple[int, int]:
-    """Accepte 'YYYY-ww' ou 'YYYY-Www'."""
-    w = str(week_str).strip().upper().replace("W", "")
-    year, week = w.split("-")
-    return int(year), int(week)
+def _mtime(path: Path | None) -> float:
+    if path is None or not path.exists():
+        return 0.0
+    return path.stat().st_mtime
 
 
-def _zscore(s: pd.Series) -> pd.Series:
-    return (s - s.mean()) / (s.std() + 1e-6)
+def _split_week(week: str) -> Tuple[int, int]:
+    w = str(week).upper().replace("W", "")
+    year, week_num = w.split("-")
+    return int(year), int(week_num)
 
 
-def fmt_int(n: float | int) -> str:
+def _zscore(series: pd.Series) -> pd.Series:
+    return (series - series.mean()) / (series.std(ddof=0) + 1e-6)
+
+
+def fmt_int(value: float | int) -> str:
     try:
-        return f"{int(round(float(n))):,}".replace(",", " ")
+        return f"{int(round(float(value))):,}".replace(",", " ")
     except Exception:
         return "-"
 
 
-def _read_csv_generic(p: Path) -> pd.DataFrame:
-    if not p.exists():
-        return pd.DataFrame()
+def _read_csv_generic(path: Path) -> pd.DataFrame:
     try:
-        return pd.read_csv(p)
+        return pd.read_csv(path)
     except Exception:
         try:
-            return pd.read_csv(p, sep=";")
+            return pd.read_csv(path, sep=";")
         except Exception:
-            return pd.read_csv(p, low_memory=False)
+            return pd.read_csv(path, low_memory=False)
 
 
-def normalize_dept(df: pd.DataFrame, col="departement") -> pd.DataFrame:
-    if col not in df.columns:
+def normalize_dept(df: pd.DataFrame, column: str = "departement") -> pd.DataFrame:
+    if column not in df.columns:
         return df
-    df[col] = df[col].astype(str).str.strip().str.upper()
-    mask_corsica = df[col].str.contains(r"[A-Z]$")
-    df.loc[~mask_corsica, col] = df.loc[~mask_corsica, col].str.zfill(2)
+    df[column] = df[column].astype(str).str.strip().str.upper()
+    mask = df[column].str.contains(r"[A-Z]$")
+    df.loc[~mask, column] = df.loc[~mask, column].str.zfill(2)
     return df
 
 
-def normalize_week(df: pd.DataFrame, col="semaine") -> pd.DataFrame:
-    if col not in df.columns:
+def normalize_week(df: pd.DataFrame, column: str = "semaine") -> pd.DataFrame:
+    if column not in df.columns:
         return df
-    df[col] = df[col].astype(str).str.upper().str.replace("W", "", regex=False)
+    df[column] = df[column].astype(str).str.upper().str.replace("W", "", regex=False)
     return df
 
 
 def find_file(name: str) -> Path | None:
-    """Recherche en priorité dans data/manual/, sinon dans /mnt/data/poc_aligned/."""
-    p1 = LOCAL_DATA / name
-    if p1.exists():
-        return p1
-    p2 = FALLBACK_DATA / name
-    if p2.exists():
-        return p2
+    candidate = LOCAL_DATA / name
+    if candidate.exists():
+        return candidate
+    fallback = FALLBACK_DATA / name
+    if fallback.exists():
+        return fallback
     return None
 
 
-# ==================
-# CHARGEMENT DONNÉES
-# ==================
 def load_geojson_file() -> dict | None:
     geo_path = find_file(REQUIRED_FILES["geojson"])
     if geo_path:
@@ -130,130 +142,74 @@ def load_geojson_file() -> dict | None:
     return None
 
 
-@st.cache_data(show_spinner=False)
-def load_all_csvs(sig: Tuple[float, ...]) -> Dict[str, pd.DataFrame]:
-    dfs: Dict[str, pd.DataFrame] = {}
-    for key, fname in REQUIRED_FILES.items():
-        if key == "geojson":
-            continue
-        p = find_file(fname)
-        if p is None:
-            dfs[key] = pd.DataFrame()
-            continue
-        df = _read_csv_generic(p)
-        # mapping minimal FR -> schéma POC
-        if key in ("vaccination_trends", "coverage"):
-            # attend: departement, nom, semaine?, couverture_vaccinale_percent
-            ren = {}
-            for c in df.columns:
-                lc = c.lower()
-                if lc in {"departement code", "département code", "code departement", "code_departement", "dep_code", "code"}:
-                    ren[c] = "departement"
-                elif lc in {"departement", "département", "depnom", "nom departement"} and "nom" not in df.columns:
-                    ren[c] = "nom"
-                elif lc.startswith("couverture") and "couverture_vaccinale_percent" not in df.columns:
-                    ren[c] = "couverture_vaccinale_percent"
-                elif lc in {"semaine", "week", "periode"}:
-                    ren[c] = "semaine"
-            if ren:
-                df = df.rename(columns=ren)
-
-        if key == "ias":
-            # departement, nom, semaine, ias_signal
-            ren = {}
-            for c in df.columns:
-                lc = c.lower()
-                if lc in {"departement code", "département code", "dep_code", "code"}:
-                    ren[c] = "departement"
-                elif lc in {"departement", "département", "depnom"} and "nom" not in df.columns:
-                    ren[c] = "nom"
-                elif "ias" in lc and "ias_signal" not in df.columns:
-                    ren[c] = "ias_signal"
-                elif lc in {"semaine", "week", "periode"}:
-                    ren[c] = "semaine"
-            if ren:
-                df = df.rename(columns=ren)
-
-        if key == "urgences":
-            # data ODISSE peuvent être au format taux; colonnes FR : "Département Code", "Département", "Semaine", ...
-            # Schéma POC: departement, nom, semaine, urgences_grippe, sos_medecins
-            ren = {}
-            for c in df.columns:
-                lc = c.lower()
-                if lc in {"département code", "departement code", "dep_code", "code departement", "code"}:
-                    ren[c] = "departement"
-                elif lc in {"département", "departement", "depnom"} and "nom" not in df.columns:
-                    ren[c] = "nom"
-                elif lc in {"semaine", "week", "periode"}:
-                    ren[c] = "semaine"
-                elif "urgences" in lc and "urgences_grippe" not in df.columns:
-                    ren[c] = "urgences_grippe"
-                elif ("sos" in lc or "actes médicaux" in lc) and "sos_medecins" not in df.columns:
-                    ren[c] = "sos_medecins"
-            if ren:
-                df = df.rename(columns=ren)
-
-        if key == "distribution":
-            # departement, nom, semaine, doses_distribuees, actes_pharmacie
-            ren = {}
-            for c in df.columns:
-                lc = c.lower()
-                if lc in {"département code", "departement code", "dep_code", "code"}:
-                    ren[c] = "departement"
-                elif lc in {"département", "departement", "depnom"} and "nom" not in df.columns:
-                    ren[c] = "nom"
-                elif lc in {"semaine", "week", "periode"}:
-                    ren[c] = "semaine"
-                elif "dose" in lc and "doses_distribuees" not in df.columns:
-                    ren[c] = "doses_distribuees"
-                elif "acte" in lc and "pharm" in lc and "actes_pharmacie" not in df.columns:
-                    ren[c] = "actes_pharmacie"
-            if ren:
-                df = df.rename(columns=ren)
-
-        # normalisations communes
-        df = normalize_dept(df, "departement")
-        df = normalize_week(df, "semaine")
-        dfs[key] = df
-
-    return dfs
-
-
 def data_signature() -> Tuple[float, ...]:
-    mtimes = []
-    for key, fname in REQUIRED_FILES.items():
+    return tuple(_mtime(find_file(fname)) for fname in REQUIRED_FILES.values())
+
+
+def load_all_csvs(sig: Tuple[float, ...]) -> Dict[str, pd.DataFrame]:
+    del sig
+    datasets: Dict[str, pd.DataFrame] = {}
+    for key, filename in REQUIRED_FILES.items():
         if key == "geojson":
-            p = find_file(fname)
-            mtimes.append(_mtime(p) if p else 0.0)
-        else:
-            p = find_file(fname)
-            mtimes.append(_mtime(p) if p else 0.0)
-    return tuple(mtimes)
+            continue
+        source = find_file(filename)
+        if source is None:
+            datasets[key] = pd.DataFrame()
+            continue
+        frame = _read_csv_generic(source)
+        rename_map: Dict[str, str] = {}
+        for column in frame.columns:
+            low = column.lower()
+            if low in {"departement code", "département code", "code departement", "code_departement", "dep_code", "code"}:
+                rename_map[column] = "departement"
+            elif low in {"departement", "département", "depnom", "nom departement"} and "nom" not in frame.columns:
+                rename_map[column] = "nom"
+            elif key in {"vaccination_trends", "coverage"} and low.startswith("couverture"):
+                rename_map[column] = "couverture_vaccinale_percent"
+            elif key in {"vaccination_trends", "coverage"} and low in {"semaine", "week", "periode"}:
+                rename_map[column] = "semaine"
+            elif key == "ias":
+                if "ias" in low and "ias_signal" not in frame.columns:
+                    rename_map[column] = "ias_signal"
+                elif low in {"semaine", "week", "periode"}:
+                    rename_map[column] = "semaine"
+            elif key == "urgences":
+                if "urgences" in low and "urgences_grippe" not in frame.columns:
+                    rename_map[column] = "urgences_grippe"
+                elif "sos" in low and "sos_medecins" not in frame.columns:
+                    rename_map[column] = "sos_medecins"
+                elif low in {"semaine", "week", "periode"}:
+                    rename_map[column] = "semaine"
+            elif key == "distribution":
+                if "dose" in low and "doses_distribuees" not in frame.columns:
+                    rename_map[column] = "doses_distribuees"
+                elif "acte" in low and "pharm" in low and "actes_pharmacie" not in frame.columns:
+                    rename_map[column] = "actes_pharmacie"
+                elif low in {"semaine", "week", "periode"}:
+                    rename_map[column] = "semaine"
+        if rename_map:
+            frame = frame.rename(columns=rename_map)
+        frame = normalize_dept(frame, "departement")
+        frame = normalize_week(frame, "semaine")
+        datasets[key] = frame
+    return datasets
 
 
-# ======================
-# PRÉPARATION / MODÈLES
-# ======================
-@dataclass(frozen=True)
-class PredBundle:
-    model: LinearRegression
-    features_used: List[str]
+@st.cache_data(show_spinner=False)
+def cached_load_all_csvs(sig: Tuple[float, ...]) -> Dict[str, pd.DataFrame]:
+    return load_all_csvs(sig)
 
 
-def build_training_frame(d: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    vacc = d["vaccination_trends"].copy()
-    ias = d["ias"].copy()
-    urg = d["urgences"].copy()
-
-    need = {"departement", "semaine", "couverture_vaccinale_percent"}
-    if vacc.empty or not need.issubset(vacc.columns):
+def build_training_frame(data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    vacc = data["vaccination_trends"].copy()
+    ias = data["ias"].copy()
+    urg = data["urgences"].copy()
+    if vacc.empty or not {"departement", "semaine", "couverture_vaccinale_percent"}.issubset(vacc.columns):
         return pd.DataFrame()
-
     vacc[["year", "week_num"]] = vacc["semaine"].apply(lambda s: pd.Series(_split_week(s)))
-    vacc.sort_values(["departement", "year", "week_num"], inplace=True)
+    vacc = vacc.sort_values(["departement", "year", "week_num"])
     vacc["prev_cov"] = vacc.groupby("departement")["couverture_vaccinale_percent"].shift(1)
     vacc["trend_cov"] = (vacc["couverture_vaccinale_percent"] - vacc["prev_cov"]).fillna(0.0)
-
     merged = (
         vacc.merge(ias[["departement", "semaine", "ias_signal"]], on=["departement", "semaine"], how="left")
         .merge(
@@ -263,8 +219,6 @@ def build_training_frame(d: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         )
     )
     merged["activity_total"] = merged["urgences_grippe"].fillna(0) + merged["sos_medecins"].fillna(0)
-
-    # Cible proxy (POC) si pas d'historique de distribution hebdo au même grain
     merged["target_proxy"] = (
         2200
         + (100 - merged["couverture_vaccinale_percent"]) * 38
@@ -272,210 +226,186 @@ def build_training_frame(d: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         + merged["activity_total"] * 6.5
         - merged["trend_cov"] * 115
     ).clip(lower=500)
-
-    merged = merged.dropna(subset=["couverture_vaccinale_percent"]).copy()
-    return merged
+    return merged.dropna(subset=["couverture_vaccinale_percent"])
 
 
 def train_predictor(train_df: pd.DataFrame) -> PredBundle | None:
     if train_df.empty:
         return None
-    feats = ["couverture_vaccinale_percent", "trend_cov", "ias_signal", "activity_total"]
-    m = LinearRegression()
-    X = train_df[feats].fillna(0.0)
+    feature_cols = ["couverture_vaccinale_percent", "trend_cov", "ias_signal", "activity_total"]
+    X = train_df[feature_cols].fillna(0.0)
     y = train_df["target_proxy"]
-    m.fit(X, y)
-    return PredBundle(model=m, features_used=feats)
+    z_ias = _zscore(train_df["ias_signal"].fillna(train_df["ias_signal"].median() if train_df["ias_signal"].notna().any() else 0))
+    z_urg = _zscore(train_df["activity_total"].fillna(0))
+    coverage_gap = np.clip(65 - train_df["couverture_vaccinale_percent"], a_min=0, a_max=None)
+    weights = (1 + 0.15 * z_ias.clip(-1, 3) + 0.1 * z_urg.clip(-1, 3) + 0.2 * (coverage_gap / 100.0)).clip(lower=0.2)
+    model = LinearRegression()
+    model.fit(X, y, sample_weight=weights)
+    r2 = r2_score(y, model.predict(X))
+    return PredBundle(model=model, features=feature_cols, r2=r2)
 
 
-def latest_week_from_any(d: Dict[str, pd.DataFrame]) -> str | None:
-    pool = []
+def latest_week_from_any(data: Dict[str, pd.DataFrame]) -> str | None:
+    weeks: List[str] = []
     for key in ("distribution", "vaccination_trends", "ias", "urgences"):
-        if "semaine" in d[key].columns:
-            pool.extend(d[key]["semaine"].dropna().tolist())
-    if not pool:
+        if "semaine" in data[key].columns:
+            weeks.extend([w for w in data[key]["semaine"].dropna().tolist() if isinstance(w, str)])
+    if not weeks:
         return None
-    pool = list(set(pool))
-
-    def k(w: str) -> Tuple[int, int]:
-        try:
-            return _split_week(w)
-        except Exception:
-            return (0, 0)
-
-    return sorted(pool, key=k)[-1]
+    weeks = list(set(weeks))
+    return sorted(weeks, key=lambda w: _split_week(w))[-1]
 
 
-def build_latest_frame(d: Dict[str, pd.DataFrame], force_week: str | None) -> pd.DataFrame:
-    wk = force_week or latest_week_from_any(d) or "N/A"
+def build_latest_frame(data: Dict[str, pd.DataFrame], selected_week: str | None) -> pd.DataFrame:
+    week = selected_week or latest_week_from_any(data)
+    if week is None:
+        return pd.DataFrame()
 
-    def sel(df, cols):
-        if df.empty:
+    def select(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+        if df.empty or "semaine" not in df.columns:
             return pd.DataFrame(columns=cols)
-        return df[df["semaine"] == wk][cols]
+        return df[df["semaine"] == week][cols]
 
-    last_trend = sel(
-        d["vaccination_trends"],
-        ["departement", "nom", "semaine", "couverture_vaccinale_percent"],
-    )
-    # calc trend_cov à partir de la semaine précédente
-    if not d["vaccination_trends"].empty:
-        tmp = d["vaccination_trends"].copy()
-        tmp[["y", "w"]] = tmp["semaine"].apply(lambda s: pd.Series(_split_week(s)))
-        tmp = tmp.sort_values(["departement", "y", "w"])
-        prev = tmp[tmp["semaine"] < wk].groupby("departement").tail(1)[
-            ["departement", "couverture_vaccinale_percent"]
-        ].rename(columns={"couverture_vaccinale_percent": "prev_cov"})
-        last_trend = last_trend.merge(prev, on="departement", how="left")
-        last_trend["trend_cov"] = (last_trend["couverture_vaccinale_percent"] - last_trend["prev_cov"]).fillna(0.0)
+    base = select(data["vaccination_trends"], ["departement", "nom", "semaine", "couverture_vaccinale_percent"])
+    if base.empty:
+        base = select(data["coverage"], ["departement", "nom", "couverture_vaccinale_percent"])
+        base["semaine"] = week
+    if not data["vaccination_trends"].empty:
+        tmp = data["vaccination_trends"].copy()
+        tmp[["year", "week_num"]] = tmp["semaine"].apply(lambda s: pd.Series(_split_week(s)))
+        tmp = tmp.sort_values(["departement", "year", "week_num"])
+        prev = (
+            tmp[tmp["semaine"] < week]
+            .groupby("departement")
+            .tail(1)[["departement", "couverture_vaccinale_percent"]]
+            .rename(columns={"couverture_vaccinale_percent": "prev_cov"})
+        )
+        base = base.merge(prev, on="departement", how="left")
+        base["trend_cov"] = (base["couverture_vaccinale_percent"] - base["prev_cov"]).fillna(0.0)
     else:
-        last_trend["trend_cov"] = 0.0
+        base["trend_cov"] = 0.0
 
-    last_ias = sel(d["ias"], ["departement", "ias_signal"]).copy()
-    last_urg = sel(d["urgences"], ["departement", "urgences_grippe", "sos_medecins"]).copy()
-    last_dist = sel(d["distribution"], ["departement", "doses_distribuees", "actes_pharmacie"]).copy()
-
-    base = last_trend.copy()
-    for part in (last_ias, last_urg, last_dist):
-        base = base.merge(part, on="departement", how="left")
-
+    pieces = [
+        select(data["ias"], ["departement", "ias_signal"]),
+        select(data["urgences"], ["departement", "urgences_grippe", "sos_medecins"]),
+        select(data["distribution"], ["departement", "doses_distribuees", "actes_pharmacie"]),
+    ]
+    for frame in pieces:
+        base = base.merge(frame, on="departement", how="left")
     base["activity_total"] = base["urgences_grippe"].fillna(0) + base["sos_medecins"].fillna(0)
     return base
 
 
-def predict_needs(df: pd.DataFrame, bundle: PredBundle | None, coverage_target: float) -> pd.DataFrame:
-    out = df.copy()
-    if out.empty:
-        return out
-
+def predict_needs(latest_df: pd.DataFrame, bundle: PredBundle | None, coverage_target: float) -> pd.DataFrame:
+    result = latest_df.copy()
+    if result.empty:
+        return result
     if bundle is None:
-        out["besoin_prevu"] = np.nan
-        out["risk_score"] = np.nan
-        out["risk_level"] = "unknown"
-        return out
-
-    X = out[bundle.features_used].fillna(0.0)
-    raw_pred = bundle.model.predict(X).clip(min=0)
-
-    # Ajustement vers cible couverture (uplift si sous la cible)
-    gap = np.clip(coverage_target * 100 - out["couverture_vaccinale_percent"], a_min=0, a_max=None)
-    z_ias = _zscore(out["ias_signal"].fillna(out["ias_signal"].median() if out["ias_signal"].notna().any() else 0))
-    ias_boost = np.clip(1 + 0.10 * z_ias, 0.8, 1.25)
-    out["besoin_prevu"] = (raw_pred * (1 + 0.30 * (gap / 100.0)) * ias_boost).astype(float)
-
-    # Risk scoring
-    z_urg = _zscore(out["activity_total"].fillna(0))
-    z_trd = _zscore(out["trend_cov"].fillna(0))
-    risk = 0.5 * z_ias + 0.4 * z_urg + 0.1 * (-z_trd)
-    out["risk_score"] = risk
-    out["risk_level"] = pd.cut(risk, bins=[-1e9, -0.25, 0.75, 1e9], labels=["low", "med", "high"]).astype(str)
-    return out
+        result["besoin_prevu"] = np.nan
+        result["risk_score"] = np.nan
+        result["risk_level"] = "indéterminé"
+        return result
+    X = result[bundle.features].fillna(0.0)
+    predictions = np.clip(bundle.model.predict(X), a_min=0, a_max=None)
+    gap = np.clip(coverage_target * 100 - result["couverture_vaccinale_percent"], a_min=0, a_max=None)
+    z_ias = _zscore(result["ias_signal"].fillna(result["ias_signal"].median() if result["ias_signal"].notna().any() else 0))
+    z_urg = _zscore(result["activity_total"].fillna(0))
+    adjust = (1 + 0.25 * (gap / 100.0) + 0.12 * z_ias.clip(-1, 2) + 0.08 * z_urg.clip(-1, 2)).clip(lower=0.6)
+    result["besoin_prevu"] = (predictions * adjust).astype(float)
+    risk = 0.45 * z_ias + 0.45 * z_urg + 0.1 * (-_zscore(result["trend_cov"].fillna(0)))
+    result["risk_score"] = risk
+    result["risk_level"] = pd.cut(
+        risk,
+        bins=[-1e9, -0.25, 0.75, 1e9],
+        labels=["faible", "modéré", "élevé"],
+    ).astype(str)
+    return result
 
 
 def propose_redistribution(df: pd.DataFrame, flex_pct: float = 0.05) -> pd.DataFrame:
-    tmp = df.copy()
-    tmp["balance"] = tmp["doses_distribuees"].fillna(0) - tmp["besoin_prevu"].fillna(0)
-    donors = tmp[tmp["balance"] > flex_pct * (tmp["besoin_prevu"].fillna(0) + 1)].copy()
-    takers = tmp[tmp["balance"] < -flex_pct * (tmp["besoin_prevu"].fillna(0) + 1)].copy()
-
-    donors = donors.sort_values("balance", ascending=False).reset_index(drop=True)
-    takers = takers.sort_values("balance", ascending=True).reset_index(drop=True)
-
+    if df.empty:
+        return pd.DataFrame()
+    work = df.copy()
+    work["balance"] = work["doses_distribuees"].fillna(0) - work["besoin_prevu"].fillna(0)
+    donors = work[work["balance"] > flex_pct * (work["besoin_prevu"].fillna(0) + 1)].sort_values("balance", ascending=False)
+    takers = work[work["balance"] < -flex_pct * (work["besoin_prevu"].fillna(0) + 1)].sort_values("balance")
+    donors = donors.reset_index(drop=True)
+    takers = takers.reset_index(drop=True)
     moves = []
     i = j = 0
     while i < len(donors) and j < len(takers):
         give = donors.loc[i, "balance"]
         need = -takers.loc[j, "balance"]
-        qty = min(give, need)
-        if qty <= 0:
+        quantity = min(give, need)
+        if quantity <= 0:
             break
         moves.append(
             {
-                "from_dept": donors.loc[i, "departement"],
-                "from_nom": donors.loc[i, "nom"],
-                "to_dept": takers.loc[j, "departement"],
-                "to_nom": takers.loc[j, "nom"],
-                "qty_suggested": int(qty),
+                "departement_source": donors.loc[i, "departement"],
+                "nom_source": donors.loc[i, "nom"],
+                "departement_cible": takers.loc[j, "departement"],
+                "nom_cible": takers.loc[j, "nom"],
+                "quantite_suggeree": int(quantity),
             }
         )
-        donors.at[i, "balance"] -= qty
-        takers.at[j, "balance"] += qty
+        donors.at[i, "balance"] -= quantity
+        takers.at[j, "balance"] += quantity
         if donors.loc[i, "balance"] <= flex_pct * (donors.loc[i, "besoin_prevu"] + 1):
             i += 1
         if takers.loc[j, "balance"] >= -flex_pct * (takers.loc[j, "besoin_prevu"] + 1):
             j += 1
-
     return pd.DataFrame(moves)
 
 
-# ============
-# UI HELPERS
-# ============
-def sidebar_controls(d: Dict[str, pd.DataFrame]) -> dict:
+def sidebar_controls(data: Dict[str, pd.DataFrame]) -> dict:
     st.sidebar.header("⚙️ Paramètres")
-
-    pool = []
+    weeks = []
     for key in ("distribution", "vaccination_trends", "ias", "urgences"):
-        if "semaine" in d[key].columns:
-            pool.extend(d[key]["semaine"].dropna().unique().tolist())
-    pool = sorted(set(pool), key=lambda w: _split_week(w) if "-" in str(w) else (0, 0))
-    sel_week = st.sidebar.selectbox("Semaine", options=pool or ["N/A"], index=len(pool) - 1 if pool else 0)
-
+        if "semaine" in data[key].columns:
+            weeks.extend(data[key]["semaine"].dropna().unique().tolist())
+    weeks = sorted(set(weeks), key=lambda w: _split_week(w) if "-" in str(w) else (0, 0))
+    selected_week = st.sidebar.selectbox("Semaine", options=weeks or ["N/A"], index=len(weeks) - 1 if weeks else 0)
     st.sidebar.markdown("---")
-    view = st.sidebar.radio("Vue carte", ["Surveillance", "Besoins prévus", "Urgences"], index=0)
-
+    palette = st.sidebar.selectbox("Palette cartographique", ["YlGnBu", "YlOrRd", "Viridis", "Cividis", "Plasma"], index=0)
     st.sidebar.markdown("---")
-    cov_target_pct = st.sidebar.slider("Cible de couverture (%)", 30, 80, 60, 1)
+    coverage_target = st.sidebar.slider("Cible de couverture (%)", 30, 80, 60, 1)
     under_threshold = st.sidebar.slider("Seuil sous-vaccination (%)", 30, 70, 45, 1)
-    palette = st.sidebar.selectbox("Palette", ["YlGnBu", "YlOrRd", "Viridis"], index=0)
-
-    st.sidebar.caption("Données : ODISSE / IAS® / IQVIA (versions POC, CSV locaux).")
-    return dict(
-        week=sel_week,
-        view=view,
-        coverage_target=cov_target_pct / 100.0,
-        under_threshold=under_threshold,
-        palette=palette,
-    )
+    render_help_sidebar()
+    st.sidebar.caption(f"Données : {LOCAL_DATA}")
+    return {
+        "week": selected_week,
+        "palette": palette,
+        "coverage_target": coverage_target / 100.0,
+        "under_threshold": under_threshold,
+    }
 
 
-def kpi_header(df: pd.DataFrame, under_threshold: int) -> None:
+def kpi_header(df: pd.DataFrame, under_threshold: int, selected_week: str, r2_value: float | None) -> None:
+    coverage_avg = df["couverture_vaccinale_percent"].mean()
+    total_needs = df["besoin_prevu"].sum()
+    activity_mean = df["activity_total"].mean()
+    high_risk = (df["risk_level"] == "élevé").sum()
     c1, c2, c3, c4 = st.columns(4)
-    cov_avg = df["couverture_vaccinale_percent"].mean()
-    needs_total = df["besoin_prevu"].sum()
-    urg_avg = df["activity_total"].mean()
-    high_risk = (df["risk_level"] == "high").sum()
-
-    c1.metric("Couverture moyenne", f"{cov_avg:.1f} %")
-    c2.metric("Doses à prévoir (total)", fmt_int(needs_total))
-    c3.metric("Urgences+SOS (moy.)", f"{urg_avg:.0f}")
-    c4.metric("Départements à risque (high)", f"{int(high_risk)}")
-
+    c1.metric("Couverture moyenne", f"{coverage_avg:.1f} %", help="Moyenne pondérée des taux de couverture sur la semaine sélectionnée.")
+    c2.metric("Doses à prévoir", fmt_int(total_needs), help="Somme des besoins estimés pour la cible sélectionnée.")
+    c3.metric("Urgences + SOS (moy.)", f"{activity_mean:.0f}", help="Activité sanitaire hebdomadaire moyenne (urgences + SOS Médecins).")
+    c4.metric("Départements à risque", f"{int(high_risk)}", help="Nombre de départements classés en risque élevé.")
     under = df[df["couverture_vaccinale_percent"] < under_threshold]
+    caption = f"Semaine analysée : {selected_week}"
+    if r2_value is not None:
+        caption += f" • R² modèle : {r2_value:.2f}"
+    st.caption(caption + f" • Source données : {LOCAL_DATA}")
     if not under.empty:
-        st.caption("Sous-vaccinés (<{}%) : {}".format(
-            under_threshold,
-            ", ".join(sorted(under["nom"].dropna().astype(str).unique()))
-        ))
+        st.caption(
+            "Sous-vaccination (<{} %) : {}".format(
+                under_threshold,
+                ", ".join(sorted(under["nom"].dropna().astype(str).unique())),
+            )
+        )
 
 
-def build_map(df: pd.DataFrame, geojson: dict, view: str, palette: str) -> px.choropleth_mapbox:
-    metric = {
-        "Surveillance": "couverture_vaccinale_percent",
-        "Besoins prévus": "besoin_prevu",
-        "Urgences": "activity_total",
-    }[view]
-    title = {
-        "Surveillance": "Taux de couverture (%)",
-        "Besoins prévus": "Besoins vaccinaux (doses)",
-        "Urgences": "Urgences + SOS (hebdo)",
-    }[view]
-    scale = {"Surveillance": "YlGnBu", "Besoins prévus": "YlOrRd", "Urgences": "YlOrRd"}[view]
-    if palette != "YlGnBu" and view == "Surveillance":
-        scale = palette
-    if palette != "YlOrRd" and view != "Surveillance":
-        scale = palette
-
+def build_map(df: pd.DataFrame, geojson: dict, metric: str, palette: str, title: str) -> px.choropleth_mapbox:
+    scale = palette if palette else PALETTES.get(metric, "Viridis")
     hover_data = {
         "departement": True,
         "nom": True,
@@ -488,7 +418,6 @@ def build_map(df: pd.DataFrame, geojson: dict, view: str, palette: str) -> px.ch
         "activity_total": ":,",
         "risk_level": True,
     }
-
     fig = px.choropleth_mapbox(
         df,
         geojson=geojson,
@@ -501,39 +430,35 @@ def build_map(df: pd.DataFrame, geojson: dict, view: str, palette: str) -> px.ch
         mapbox_style="carto-positron",
         center={"lat": 46.6, "lon": 1.9},
         zoom=4.7,
-        opacity=0.78,
+        opacity=0.82,
         labels={metric: title},
     )
     fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), coloraxis_colorbar=dict(title=title))
     return fig
 
 
-def render_tabs(latest_df: pd.DataFrame, geojson: dict, controls: dict, all_data: Dict[str, pd.DataFrame]) -> None:
-    tab1, tab2, tab3 = st.tabs(["🗺️ Surveillance", "📈 Tendances & Prédictions", "🚚 Logistique"])
-    with tab1:
+def download_button(label: str, frame: pd.DataFrame, filename: str) -> None:
+    st.download_button(
+        label,
+        data=frame.to_csv(index=False).encode("utf-8"),
+        file_name=filename,
+        mime="text/csv",
+    )
+
+
+def render_prediction_tab(latest_df: pd.DataFrame, geojson: dict, palette: str, train_df: pd.DataFrame, bundle: PredBundle | None) -> None:
+    st.subheader("Vision prédictive")
+    if not latest_df.empty and geojson.get("features"):
         st.plotly_chart(
-            build_map(latest_df, geojson, "Surveillance" if controls["view"] == "Surveillance" else controls["view"], controls["palette"]),
+            build_map(latest_df, geojson, "besoin_prevu", palette, "Besoins vaccinaux (doses)"),
             use_container_width=True,
             config={"displayModeBar": False},
         )
-
-        # Classements rapides
-        c1, c2 = st.columns(2)
-        with c1:
-            top_need = latest_df.sort_values("besoin_prevu", ascending=False)[["nom", "departement", "besoin_prevu"]].head(15)
-            st.markdown("**Top besoins (doses)**")
-            st.dataframe(top_need, use_container_width=True, hide_index=True)
-        with c2:
-            top_urg = latest_df.sort_values("activity_total", ascending=False)[["nom", "departement", "activity_total"]].head(15)
-            st.markdown("**Top activité grippe (Urgences + SOS)**")
-            st.dataframe(top_urg, use_container_width=True, hide_index=True)
-
-    with tab2:
-        # Tendance couverture (moyenne nationale)
-        hist = all_data["vaccination_trends"].copy()
-        if not hist.empty:
+    cols = st.columns(2)
+    with cols[0]:
+        if not train_df.empty:
             trend = (
-                hist.groupby("semaine")
+                train_df.groupby("semaine")
                 .agg(couverture_moyenne=("couverture_vaccinale_percent", "mean"))
                 .reset_index()
             )
@@ -542,113 +467,171 @@ def render_tabs(latest_df: pd.DataFrame, geojson: dict, controls: dict, all_data
                 x="semaine",
                 y="couverture_moyenne",
                 markers=True,
-                title="Couverture vaccinale – moyenne hebdomadaire (France)",
+                title="Couverture vaccinale – moyenne hebdomadaire",
                 labels={"semaine": "Semaine", "couverture_moyenne": "Couverture (%)"},
             )
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
         else:
-            st.info("Pas d'historique de couverture (vaccination_trends.csv).")
-
-        # Corrélation simple IAS / Urgences / Besoin
-        corr_df = latest_df[["ias_signal", "activity_total", "besoin_prevu"]].dropna()
-        if len(corr_df) >= 5:
-            st.markdown("**Corrélation IAS / Activité / Besoin**")
-            st.dataframe(corr_df.corr().round(2), use_container_width=True)
+            st.info("Historique de couverture indisponible pour tracer la tendance.")
+    with cols[1]:
+        corr_cols = ["couverture_vaccinale_percent", "ias_signal", "activity_total", "target_proxy"]
+        corr = train_df[corr_cols].dropna() if not train_df.empty else pd.DataFrame()
+        if len(corr) >= 5:
+            st.markdown("**Corrélations (train)**")
+            st.dataframe(corr.corr().round(2), use_container_width=True)
         else:
-            st.info("Trop peu de données pour une corrélation exploitable sur la semaine sélectionnée.")
+            st.info("Données insuffisantes pour une matrice de corrélation.")
+    if not latest_df.empty:
+        download_button("⬇️ Exporter les besoins estimés", latest_df, f"besoins_{latest_df['semaine'].iloc[0]}.csv")
 
-    with tab3:
-        st.markdown("**Propositions de redistribution (excédents → déficits)**")
-        plan = propose_redistribution(latest_df, flex_pct=0.05)
+
+def render_logistics_tab(latest_df: pd.DataFrame) -> None:
+    st.subheader("Logistique vaccinale")
+    if latest_df.empty:
+        st.info("Données logistiques indisponibles.")
+        return
+    col1, col2 = st.columns(2)
+    with col1:
+        top_dist = latest_df.sort_values("doses_distribuees", ascending=False)[
+            ["nom", "departement", "doses_distribuees", "actes_pharmacie"]
+        ].head(15)
+        st.markdown("**Volume distribué (Top 15)**")
+        st.dataframe(top_dist, use_container_width=True, hide_index=True)
+    with col2:
+        plan = propose_redistribution(latest_df)
+        st.markdown("**Redistribution suggérée (±5 %)**")
         if plan.empty:
-            st.success("Aucune redistribution nécessaire (seuil ±5%).")
+            st.success("Ajustements non nécessaires selon le seuil choisi.")
         else:
             st.dataframe(plan, use_container_width=True, hide_index=True)
-            st.download_button(
-                "⬇️ Exporter les propositions (CSV)",
-                data=plan.to_csv(index=False).encode("utf-8"),
-                file_name=f"redistribution_{latest_df['semaine'].iloc[0]}.csv",
-                mime="text/csv",
-            )
+            download_button("⬇️ Exporter la redistribution", plan, f"redistribution_{latest_df['semaine'].iloc[0]}.csv")
+    download_button("⬇️ Exporter la logistique", latest_df[
+        ["departement", "nom", "semaine", "doses_distribuees", "actes_pharmacie", "besoin_prevu", "risk_level"]
+    ], f"logistique_{latest_df['semaine'].iloc[0]}.csv")
 
-        st.markdown("---")
-        st.markdown("**Table complète – Export**")
-        display_cols = [
-            "departement","nom","semaine",
-            "couverture_vaccinale_percent","ias_signal",
-            "urgences_grippe","sos_medecins","activity_total",
-            "doses_distribuees","actes_pharmacie","trend_cov",
-            "besoin_prevu","risk_level","risk_score",
-        ]
-        table = latest_df[[c for c in display_cols if c in latest_df.columns]].copy()
-        st.dataframe(table, use_container_width=True, hide_index=True)
-        st.download_button(
-            "⬇️ Exporter la table (CSV)",
-            data=table.to_csv(index=False).encode("utf-8"),
-            file_name=f"poc_table_{latest_df['semaine'].iloc[0]}.csv",
-            mime="text/csv",
+
+def render_health_tab(latest_df: pd.DataFrame, geojson: dict, palette: str) -> None:
+    st.subheader("Urgences & IAS")
+    if not latest_df.empty and geojson.get("features"):
+        st.plotly_chart(
+            build_map(latest_df, geojson, "activity_total", palette, "Urgences + SOS (hebdo)"),
+            use_container_width=True,
+            config={"displayModeBar": False},
         )
+    col1, col2 = st.columns(2)
+    with col1:
+        top_activity = latest_df.sort_values("activity_total", ascending=False)[
+            ["nom", "departement", "activity_total", "urgences_grippe", "sos_medecins"]
+        ].head(15)
+        st.markdown("**Pression sanitaire (Top 15)**")
+        st.dataframe(top_activity, use_container_width=True, hide_index=True)
+    with col2:
+        if "ias_signal" in latest_df.columns and latest_df["ias_signal"].notna().any():
+            fig = px.histogram(
+                latest_df,
+                x="ias_signal",
+                nbins=15,
+                title="Distribution du signal IAS",
+                labels={"ias_signal": "IAS"},
+            )
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.info("Signal IAS indisponible pour la semaine analysée.")
+    download_button("⬇️ Exporter les indicateurs sanitaires", latest_df[
+        ["departement", "nom", "semaine", "ias_signal", "urgences_grippe", "sos_medecins", "activity_total"]
+    ], f"sante_{latest_df['semaine'].iloc[0]}.csv")
 
 
-# =========
-# MAIN APP
-# =========
+def render_targeting_tab(latest_df: pd.DataFrame, geojson: dict, palette: str, under_threshold: int) -> None:
+    st.subheader("Ciblage territorial")
+    if latest_df.empty:
+        st.info("Données de ciblage indisponibles.")
+        return
+    targeting = latest_df.copy()
+    targeting["sous_vaccination"] = targeting["couverture_vaccinale_percent"] < under_threshold
+    targeting["priorite"] = np.select(
+        [
+            (targeting["sous_vaccination"]) & (targeting["risk_level"] == "élevé"),
+            (targeting["sous_vaccination"]),
+            (targeting["risk_level"] == "élevé"),
+        ],
+        ["critique", "surveiller", "surveiller"],
+        default="stable",
+    )
+    if geojson.get("features"):
+        st.plotly_chart(
+            build_map(targeting, geojson, "risk_score", palette, "Score de risque"),
+            use_container_width=True,
+            config={"displayModeBar": False},
+        )
+    focus = targeting[
+        targeting["priorite"].isin(["critique", "surveiller"])
+    ][
+        [
+            "nom",
+            "departement",
+            "couverture_vaccinale_percent",
+            "besoin_prevu",
+            "risk_level",
+            "risk_score",
+            "sous_vaccination",
+            "priorite",
+        ]
+    ].sort_values(["priorite", "risk_score"], ascending=[True, False])
+    if focus.empty:
+        st.success("Aucun département sous le seuil de couverture.")
+    else:
+        st.markdown("**Zones à surveiller**")
+        st.dataframe(focus, use_container_width=True, hide_index=True)
+        download_button("⬇️ Exporter le ciblage", focus, f"ciblage_{latest_df['semaine'].iloc[0]}.csv")
+
+
 def main() -> None:
-    st.title("POC – Carte Prédictive Vaccination Grippe")
-    st.caption("Exploration interactive : couverture vaccinale, besoins prévus, activité SOS/urgences et logistique.")
+    st.title("Carte prédictive vaccination grippe")
 
-    # Chargement GeoJSON (ou uploader)
     geojson = load_geojson_file()
     if geojson is None:
-        st.warning("`departements.geojson` introuvable. Dépose le fichier ci-dessous pour activer la carte :")
-        up = st.file_uploader("Uploader departements.geojson", type=["geojson", "json"])
-        if up is not None:
-            geojson = json.load(io.StringIO(up.getvalue().decode("utf-8")))
+        st.warning("Le fichier departements.geojson est introuvable. Ajoute-le pour activer la carte.")
+        uploaded = st.file_uploader("Importer un GeoJSON de départements", type=["geojson", "json"])
+        if uploaded is not None:
+            geojson = json.load(io.StringIO(uploaded.getvalue().decode("utf-8")))
         else:
-            st.info("La carte sera masquée tant que le GeoJSON n'est pas fourni.")
+            geojson = {"type": "FeatureCollection", "features": []}
 
-    # Chargement CSV (avec fallback + normalisation)
     sig = data_signature()
-    data = load_all_csvs(sig)
+    data = cached_load_all_csvs(sig)
 
-    # Si un fichier est manquant, proposer des uploaders ciblés
-    missing = [k for k in ("vaccination_trends","ias","urgences","distribution") if data[k].empty]
+    missing = [key for key in ("vaccination_trends", "ias", "urgences", "distribution") if data[key].empty]
     if missing:
-        st.error("Fichiers CSV manquants ou vides : " + ", ".join(missing))
-        with st.expander("Uploader des CSV (format POC)"):
+        st.error("Fichiers manquants ou vides : " + ", ".join(missing))
+        with st.expander("Importer des fichiers CSV"):
             for key in missing:
-                up = st.file_uploader(f"Déposer {REQUIRED_FILES[key]}", type=["csv"], key=f"up_{key}")
-                if up is not None:
-                    df = _read_csv_generic(Path(up.name))
-                    df = pd.read_csv(up)  # lecture directe
-                    # normalisations minimales
-                    df = normalize_dept(df, "departement")
-                    df = normalize_week(df, "semaine")
-                    data[key] = df
-        if any(data[k].empty for k in ("vaccination_trends","ias","urgences","distribution")):
+                file = st.file_uploader(f"Déposer {REQUIRED_FILES[key]}", type=["csv"], key=f"up_{key}")
+                if file is not None:
+                    df_upload = pd.read_csv(file)
+                    df_upload = normalize_dept(df_upload, "departement")
+                    df_upload = normalize_week(df_upload, "semaine")
+                    data[key] = df_upload
+        if any(data[k].empty for k in ("vaccination_trends", "ias", "urgences", "distribution")):
             st.stop()
 
-    # Contrôles UI
     controls = sidebar_controls(data)
-
-    # Entraînement modèle
     train_df = build_training_frame(data)
     bundle = train_predictor(train_df)
+    latest_df = build_latest_frame(data, controls["week"])
+    latest_df = predict_needs(latest_df, bundle, controls["coverage_target"])
 
-    # Semaine sélectionnée
-    latest_df = build_latest_frame(data, force_week=controls["week"])
-    latest_df = predict_needs(latest_df, bundle, coverage_target=controls["coverage_target"])
+    kpi_header(latest_df, controls["under_threshold"], controls["week"], bundle.r2 if bundle else None)
 
-    # KPI
-    kpi_header(latest_df, under_threshold=controls["under_threshold"])
-
-    # Vues / Onglets
-    if geojson is not None:
-        render_tabs(latest_df, geojson, controls, data)
-    else:
-        st.info("Carte indisponible (GeoJSON manquant). Les tableaux restent exportables.")
-        # Affiche tout de même les tableaux / exports
-        render_tabs(latest_df, {"type":"FeatureCollection","features":[]}, controls, data)
+    tabs = st.tabs(["🧠 Prédiction", "🚚 Logistique", "🏥 Urgences & IAS", "🎯 Ciblage territorial"])
+    with tabs[0]:
+        render_prediction_tab(latest_df, geojson, controls["palette"], train_df, bundle)
+    with tabs[1]:
+        render_logistics_tab(latest_df)
+    with tabs[2]:
+        render_health_tab(latest_df, geojson, controls["palette"])
+    with tabs[3]:
+        render_targeting_tab(latest_df, geojson, controls["palette"], controls["under_threshold"])
 
 
 if __name__ == "__main__":
