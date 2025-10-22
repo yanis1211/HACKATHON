@@ -1,140 +1,164 @@
-# EpiTrack – POC Tableau de bord grippe
+# EpiTrack – carnet d'utilisation (POC grippe)
 
-EpiTrack est un prototype Streamlit destiné aux équipes santé publique (ARS, ministère, hôpitaux, pharmaciens). Il consolide les données de vaccination grippe, signaux IAS, passages urgences/SOS et distribution pour :
+Ce document explique **pas à pas** comment lancer et comprendre EpiTrack. Imagine que tu accompagnes un collègue qui découvre l'outil pour la première fois : on suit les étapes ensemble, avec des mots simples et aucune boîte noire.
 
-- visualiser la couverture vaccinale et les besoins prévisionnels par département,
-- anticiper les flux patients sur 12 mois,
-- proposer une allocation de stocks proportionnelle aux besoins,
-- présenter clairement les hypothèses (corrigé IAS, saisonnalité) sans boîte noire.
+---
 
-## 1. Fonctionnalités principales
+## 1. À quoi sert EpiTrack ?
 
-| Vue | Objectif | Contenu |
-| --- | --- | --- |
-| 🗺️ Carte | Surveiller zones sous-vaccinées | Choroplèthe métropole, toggle `Couverture` / `Besoin`, infobulle actionnable |
-| 📈 Prévisions vaccins | Suivre besoin vs flux | Graphique combiné Besoin (axe gauche) + Flux patients (axe droit) sur 12 mois, badge de confiance, résumé hypothèses |
-| 🚚 Distribution | Allouer le stock national | Paramètres `Stock` & `Cible`, heuristique d’allocation (proportionnelle + cap), export CSV |
-| ℹ️ Notes | Transparence du modèle | Rappel des formules (moyenne mobile 3 mois, correction IAS, uplift hiver) |
+EpiTrack est un tableau de bord Streamlit qui aide les acteurs de la santé publique à :
 
-Les DOM‑TOM (codes INSEE 97/98) sont exclus pour rester sur un périmètre métropolitain cohérent.
+1. Repérer les **départements sous-vaccinés** (couverture grippe faible).
+2. Estimer les **besoins en doses** mois par mois (prévision 12 mois).
+3. Visualiser la **pression sur les urgences/SOS Médecins**.
+4. Répartir un **stock national** de vaccins selon les besoins.
+5. Comprendre les hypothèses (moyenne mobile, correction IAS, effort hiver) via des sliders visibles.
 
-## 2. Prérequis
+> **Important** : seules les données métropolitaines (01–95, 2A, 2B) sont conservées. Les codes 97/98 (DOM‑TOM) sont filtrés d’office.
 
-- Python 3.10 ou plus
-- `pip` ou `pipenv`
+Cliquer [ici](#10-résumé-express-3-minutes-chrono) pour le getting started express
 
-## 3. Installation
+---
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate  # sous Windows : .\.venv\Scripts\activate
-pip install -r requirements.txt
-```
+## 2. Préparer l'environnement
 
-## 4. Lancer l’application
+1. Avoir **Python 3.10+** installé.
+2. Cloner ou télécharger le repo, puis depuis la racine :
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate      # sous Windows : .\.venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+3. Vérifier le dossier `data/manual/`. Les fichiers suivants peuvent être collés manuellement (CSV/Excel) :
+
+   | Fichier | Colonnes minimales | Utilité |
+   | --- | --- | --- |
+   | `vaccination_trends.csv` | `departement`, `semaine` (YYYY-ww), `couverture_vaccinale_percent`, `nom` (optionnel) | Taux hebdomadaire grippe |
+   | `ias.csv` | `departement`, `semaine`, `ias_signal` | Signal IAS (incidence) |
+   | `urgences.csv` | `departement`, `semaine`, `urgences_grippe`, `sos_medecins` | Passages hebdo |
+   | `distribution.csv` | `departement`, `semaine`, `doses_distribuees`, `actes_pharmacie` | Livraisons hebdo |
+   | `coverage.csv` *(facultatif)* | `departement`, `couverture_vaccinale_percent`, `nom` | Valeur fallback |
+   | `meteo.csv` *(facultatif)* | Exemple : `temp_moy`, `humidite`… | Pas utilisé pour ce POC mais géré |
+   | `departements.geojson` | `properties.code`, `properties.nom` | Carte des départements métropolitains |
+
+   Si un fichier manque, EpiTrack génère des données **mock** pour garder la démo fonctionnelle.
+
+---
+
+## 3. Lancer l'application
 
 ```bash
 streamlit run src/app/streamlit_app.py
 ```
 
-L’interface est accessible sur `http://localhost:8501`. La barre latérale propose :
+Une page s’ouvre dans ton navigateur (`http://localhost:8501`). Sur la gauche, tu vois la **barre latérale** avec :
 
-1. Sélecteur de mois (`historique` ou `prévision` M+1/M+2/M+3)
-2. Curseurs `Cible couverture`, `Seuil sous-vaccination`, `Uplift hiver (%)`, `Coefficient IAS`
-3. Rappels sur les données historiques disponibles.
+- un **sélecteur de mois** (historique ou prévision M+1/M+2/M+3),
+- des **curseurs** : `Cible couverture`, `Seuil sous-vaccination`, `Uplift hiver (%)`, `Coefficient IAS (k)`.
 
-Les paramètres actifs (cible, uplift, IAS) sont rappelés en haut de l’écran, juste sous les KPI.
+Les paramètres actifs sont rappelés en haut de l’écran principal pour savoir d’un coup d’œil ce qui est appliqué.
 
-## 5. Jeux de données attendus (`data/manual/`)
+---
 
-Chaque fichier peut être collé manuellement depuis Excel / CSV. Les noms de colonnes sont normalisés automatiquement (lowercase, accents, etc.) ; si un fichier manque, un jeu de données mock est généré pour garder la démo fonctionnelle.
+## 4. Ce que fait EpiTrack sur les données
 
-| Fichier | Colonnes minimales | Remarques |
-| --- | --- | --- |
-| `vaccination_trends.csv` | `departement`, `semaine` (YYYY-ww), `couverture_vaccinale_percent`, `nom` (optionnel) | Taux hebdomadaire de couverture |
-| `ias.csv` | `departement`, `semaine`, `ias_signal` | Incidence / signal IAS |
-| `urgences.csv` | `departement`, `semaine`, `urgences_grippe`, `sos_medecins` | Nombre d’actes hebdomadaires |
-| `distribution.csv` | `departement`, `semaine`, `doses_distribuees`, `actes_pharmacie` | Livraisons hebdomadaires |
-| `coverage.csv` (optionnel) | `departement`, `couverture_vaccinale_percent`, `nom` | Valeur fallback si l’historique manque |
-| `meteo.csv` (optionnel) | `departement`, `semaine`, `temp_moy`, `temp_min`, `humidite`, `precipitations`, `anomalie_temp` | Non exploité dans le modèle actuel mais structure déjà prévue |
-| `departements.geojson` | `properties.code`, `properties.nom` | Base géographique carte métropolitaine |
+1. **Normalisation** : noms de colonnes harmonisés (`Code Departement` → `departement`, etc.), zfill des codes (`1` → `01`).
+2. **Agrégation mensuelle** : chaque semaine est rattachée au mois de sa fin de semaine.
+   - `couverture_mois` = moyenne pondérée par un proxy population (`doses + flux*25 + 5000`).
+   - `incidence_mois` = IAS média (winsorized P5/P95 pour lisser les extrêmes).
+   - `flux_mois` = urgences + SOS à l’échelle du mois.
+   - `confidence` = faible (<5 mois), moyenne (5–8), élevée (≥9).
+3. **Prévision** : moyenne mobile 3 mois + tendance + corrections.
+   - `coverage_proj = MA3 + trend + k * zscore(IAS)` *(tronqué entre -2 et 2)*.
+   - `besoin_prevu = max(0, pop_proxy * cible – pop_proxy * coverage_proj /100) * (1 + uplift hiver)`.
+   - L’uplift hiver s’applique aux mois {novembre, décembre, janvier, février}.
+4. **Flux patients** : `flux_proj = max(0, flux_ma3 + trend_flux)`.
+5. **Allocation** : `ratio = besoin_dpt / somme(besoins)` puis `allocation = floor(ratio * stock)` avec un plafonnement si `couverture_mois ≥ cible`.
 
-**Important :** les codes INSEE sont gérés en chaîne (`01`, `2A`, `2B`), et les départements `97*` / `98*` sont filtrés.
+Les mois futurs apparaissent avec une étiquette `(prévision)` dans l’interface.
 
+Le moteur charge automatiquement des mocks si un fichier est manquant. Pour créer manuellement des CSV, vous pouvez vous inspirer de `scripts/generate_mock_data.py` ou déposer vos propres extractions dans `data/manual/` en respectant les schémas ci-dessus.
+
+## Pharmacies (données officielles)
+
+Si vous voulez activer la recherche des pharmacies dans l'application, placez le fichier officiel fourni par Santé publique France dans `data/manual/`.
+
+- Nom attendu : `santefr-lieux-vaccination-grippe-pharmacie.csv`
+- Source officielle : https://www.data.gouv.fr/datasets/lieux-de-vaccination-contre-la-grippe-pharmacies-sante-fr/
+
+Le loader priorise ce fichier manuel (séparateur `;`) et utilise les colonnes `Finess`, `Titre`, `Adresse_voie 1`, `Adresse_codepostal`, `Adresse_ville`, `Adresse_latitude`, `Adresse_longitude` pour construire la liste des lieux. Si le fichier est présent, la fonctionnalité "Pharmacies" dans le dashboard lira directement ces lieux sans appeler l'API Overpass.
+
+Remarques :
+- Le champ `Modalites_accueil` contient du HTML/texte libre (horaires, modalités RDV) — on peut implémenter un nettoyage si nécessaire.
+- Si vous préférez récupérer les lieux depuis OpenStreetMap, utilisez `src/etl/fetch_pharmacies.py` (interroge Overpass). Attention aux quotas des services publics.
 ## 6. Flux de transformation
+---
 
-1. **Normalisation** : chaque CSV est aligné (`departement`, `semaine`).
-2. **Agrégation mensuelle** :
-   - `couverture_mois` = moyenne pondérée par un proxy population (`doses + flux*25 + offset`).
-   - `incidence_mois` = moyenne winsorized (P5/P95) pour éviter les outliers.
-   - `flux_mois` = somme urgences + SOS sur les semaines du mois (rattachées au mois de fin de semaine).
-   - `confidence` = élevée ≥ 9 mois d’historique, moyenne 5–8, faible sinon.
-3. **Prévision** : moyenne mobile 3 mois + tendance + corrections (IAS, uplift hiver).
+## 5. Naviguer dans l’application
 
-## 7. Modèle
+### 5.1 KPI globaux
 
-### 7.1 Besoin vaccinal (par département × mois)
+En haut :
 
-```
-couverture_proj = coverage_ma3 + trend_cov + k * zscore(IAS)
-besoin_prevu   = max(0, population_proxy * cible – population_proxy * couverture_proj / 100) * (1 + uplift_hiver)
-```
+- Doses estimées (total des besoins du mois sélectionné).
+- Couverture moyenne pondérée.
+- Nombre de départements en risque rouge (<60 %).
+- Flux patients (urgences + SOS).
 
-- `coverage_ma3` : moyenne mobile 3 mois
-- `trend_cov` : différence MA3 vs mois-1 (corrige la pente)
-- `k` : coefficient IAS (slider 0 – 0,30)
-- `uplift_hiver` : appliqué aux mois 11-12-01-02 (slider 0 – 30 %)
+### 5.2 Onglet « 🗺️ Carte »
 
-### 7.2 Flux patients (urgences + SOS)
+- Basculer entre `Couverture (%)` et `Besoin (doses)`.
+- Infobulle : `nom`, `couverture`, `besoin`, `flux`, `risque`.
+- Notice en bas : **Comment lire / Hypothèse / Action** (ex. “cibler les zones rouges avant la campagne”).
 
-```
-flux_proj = max(0, flux_ma3 + trend_flux)
-```
+### 5.3 Onglet « 📈 Prévisions vaccins »
 
-- Fallback “confiance faible” si < 6 mois d’historique.
+- Sélectionner un département.
+- Indicateurs : besoin estimé, couverture actuelle, badge de confiance.
+- Graphique combiné (axe gauche = besoin, axe droit = flux). La légende rappelle la signification.
+- Courbe nationale (besoin total) sur 12 mois.
+- Note “Historique court : prudence” si < 6 mois d’historique.
 
-### 7.3 Allocation des stocks
+### 5.4 Onglet « 🚚 Distribution »
 
-```
-ratio_dpt = besoin_prevu_dpt / somme(besoin_prevu)
-allocation = floor(ratio_dpt * stock_national)
-si couverture_mois ≥ cible => allocation *= 0.1
-```
+- Entrer le stock national (valeur numérique).
+- Définir la couverture cible.
+- Cliquer “Calculer l’allocation” : le tableau propose un plan (colonne `Historique/Prévision`).
+- Bouton “Télécharger CSV”.
+- Note “Action : redistribuer avant saturation des zones rouges”.
 
-Le tableau affiche `allocation_proposée`, `stock_restant` et un badge “Historique / Prévision”.
+### 5.5 Onglet « ℹ️ Notes »
 
-## 8. Utilisation pas à pas
+- Rappelle les formules utilisées.
+- Donne une interprétation simple des sliders.
 
-1. **Vérifier / alimenter `data/manual/`**. Un simple `ls data/manual` permet de voir les fichiers en place. Les colonnes peuvent être à entête libre (le loader les renomme), mais il faut garder l’intitulé des variables (voir section 5).
-2. **Lancer Streamlit** et sélectionner un mois dans la barre latérale.
-3. **Ajuster les sliders** :
-   - `Cible couverture (%)`: objectif de campagne.
-   - `Seuil sous-vaccination (%)`: pour l’assistant décisionnel.
-   - `Uplift hiver (%)`: intensité saisonnière.
-   - `Coefficient IAS`: sensibilité aux signaux IAS.
-4. **Explorer les onglets** :
-   - **Carte** : repérer les zones rouge/orange ; survoler pour voir besoin, flux, tendance.
-   - **Prévisions vaccins** : choisir un département, analyser besoin vs flux, noter la confiance.
-   - **Distribution** : renseigner le stock national et calculer l’allocation ; exporter le CSV.
-   - **Notes** : rappeler les hypothèses et expliquer le changement des sliders.
+---
 
-## 9. Exemples de commandes utiles
+## 6. Exemple rapide
 
-- Vérifier la présence des colonnes après normalisation :
+1. Mois choisi : `2025-10`.
+2. Cible couverture : `65 %`. Uplift hiver : `20 %`. k IAS : `0.15`.
+3. Carte → identifier les départements rouges (<60 %). Légende suggère campagne ciblée.
+4. Prévisions → département “Nord (59)” : besoin ~3 200 doses, flux en hausse → alerte sur renfort logistique.
+5. Distribution → stock national `80 000`. Allocation exportable (`allocation_2025-10.csv`).
 
+---
+
+## 7. Commandes utiles (pour vérifier les données)
+
+- Aperçu des données agrégées :
   ```bash
   PYTHONPATH=src python3 - <<'PY'
   from core.data_loader import load_data_bundle
   bundle = load_data_bundle()
-  print(bundle.vaccination_trends.head())
+  print(bundle.monthly_metrics.head())
   PY
   ```
 
-- Générer les prévisions pour le dernier mois :
-
+- Calcul d’une prévision mensuelle :
   ```bash
   PYTHONPATH=src python3 - <<'PY'
-  from core.data_loader import load_data_bundle, generate_future_months
+  from core.data_loader import load_data_bundle
   from core.model import predict_needs
 
   bundle = load_data_bundle()
@@ -144,11 +168,32 @@ Le tableau affiche `allocation_proposée`, `stock_restant` et un badge “Histor
   PY
   ```
 
-## 10. Notes & limites
+---
 
-- POC volontairement simple : pas de ML “boîte noire”, tout est basé sur moyennes mobiles / corrections paramétrables.
-- Les prévisions futures sont signalées `(prévision)` dans l’UI.
-- Les départements manquants ou incohérents se voient attribuer des valeurs mock pour garder une démo fluide.
-- Pour ajouter des jeux de données optionnels (météo, socio-démo), l’architecture de `core/data_loader.py` permet de fusionner de nouvelles sources.
+## 8. Bonnes pratiques et limites
+
+- Ajouter idéalement **12 mois** d’historique pour de meilleures tendances.
+- Vérifier les entêtes lors de la création des CSV (même si le loader renomme, garder les champs essentiels).
+- Les ressources DOM‑TOM sont exclues ; si tu souhaites les intégrer, adapter le code.
+- La météo est chargée mais non utilisée (prévu pour une future version).
+- Les formules sont simples (pas de machine learning avancé) pour rester expliquables.
 
 ---
+
+## 9. Pistes d’évolution
+
+- Intégrer un modèle ARIMA/Prophet pour raffiner la prévision.
+- Ajouter des données socio-démographiques (densité, âge) dans `monthly_metrics`.
+- Exposer les résultats via une API (FastAPI) pour d’autres dashboards.
+- Connecter une base (Postgres, BigQuery) pour éviter la saisie manuelle.
+
+---
+
+## 10. Résumé express (3 minutes chrono)
+
+1. `source .venv/bin/activate` puis `pip install -r requirements.txt`.
+2. Vérifier / coller les fichiers CSV dans `data/manual/`.
+3. `streamlit run src/app/streamlit_app.py`.
+4. Choisir un mois dans la barre latérale et régler les sliders.
+5. Explorer Carte → Prévisions → Distribution → Notes.
+6. Exporter le plan d’allocation si besoin.
