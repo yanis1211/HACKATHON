@@ -160,7 +160,14 @@ def main() -> None:
     render_assistant_panel(per_dept, coverage_target_pct, under_threshold_pct)
     render_month_calendar(historical_months, future_months, month)
 
-    tabs = st.tabs(["🗺️ Carte", "📈 Prévisions", "🚚 Distribution", "ℹ️ Notes"])
+    # add a minimal Pharmacies tab (optional service)
+    try:
+        from services.locations import geocode_address, nearest_pharmacies
+        _HAS_LOCATIONS = True
+    except Exception:
+        _HAS_LOCATIONS = False
+
+    tabs = st.tabs(["🗺️ Carte", "📈 Prévisions", "🚚 Distribution", "ℹ️ Notes", "🔎 Pharmacies"])
 
     with tabs[0]:
         prediction.render_map(prediction_result, bundle.geojson)
@@ -182,6 +189,38 @@ def main() -> None:
                 prediction_result.season_uplift_pct,
             )
         )
+
+    # Minimal Pharmacies tab: non-intrusive, only active if locations service is available
+    with tabs[4]:
+        st.header("🔎 Pharmacies (optionnel)")
+        if not _HAS_LOCATIONS:
+            st.info("Module 'services.locations' non disponible — ajoutez-le pour activer cette fonctionnalité.")
+        else:
+            addr = st.text_input("Adresse (ex: 10 rue de la Paix, Paris)")
+            if st.button("Chercher"):
+                if not addr:
+                    st.warning("Veuillez saisir une adresse.")
+                else:
+                    try:
+                        geo = geocode_address(addr)
+                        if not geo:
+                            st.error("Adresse introuvable via le géocodeur.")
+                        else:
+                            lat = float(geo["lat"])  # type: ignore
+                            lon = float(geo["lon"])  # type: ignore
+                            results = nearest_pharmacies(lat, lon, n=5)
+                            if not results:
+                                st.info("Aucune pharmacie trouvée — vérifiez data/manual/ ou exécutez l'ETL.")
+                            else:
+                                dfp = pd.DataFrame(results)
+                                dfp["distance_km"] = (dfp["distance_m"] / 1000).round(2)
+                                st.dataframe(dfp[["name", "street", "postcode", "city", "distance_km"]])
+                                map_df = dfp.rename(columns={"lat": "latitude", "lon": "longitude"})
+                                st.map(map_df[["latitude", "longitude"]])
+                    except FileNotFoundError as e:
+                        st.error(str(e))
+                    except Exception as e:
+                        st.error(f"Erreur: {e}")
 
 
 if __name__ == "__main__":

@@ -52,3 +52,16 @@ Grain pivot : `departement` (chaîne INSEE) × `semaine` (ISO). Les vues agrège
 ## Générer des données de démonstration
 
 Le moteur charge automatiquement des mocks si un fichier est manquant. Pour créer manuellement des CSV, vous pouvez vous inspirer de `scripts/generate_mock_data.py` ou déposer vos propres extractions dans `data/manual/` en respectant les schémas ci-dessus.
+
+## Pharmacies (données officielles)
+
+Si vous voulez activer la recherche des pharmacies dans l'application, placez le fichier officiel fourni par Santé publique France dans `data/manual/`.
+
+- Nom attendu : `santefr-lieux-vaccination-grippe-pharmacie.csv`
+- Source officielle : https://www.data.gouv.fr/datasets/lieux-de-vaccination-contre-la-grippe-pharmacies-sante-fr/
+
+Le loader priorise ce fichier manuel (séparateur `;`) et utilise les colonnes `Finess`, `Titre`, `Adresse_voie 1`, `Adresse_codepostal`, `Adresse_ville`, `Adresse_latitude`, `Adresse_longitude` pour construire la liste des lieux. Si le fichier est présent, la fonctionnalité "Pharmacies" dans le dashboard lira directement ces lieux sans appeler l'API Overpass.
+
+Remarques :
+- Le champ `Modalites_accueil` contient du HTML/texte libre (horaires, modalités RDV) — on peut implémenter un nettoyage si nécessaire.
+- Si vous préférez récupérer les lieux depuis OpenStreetMap, utilisez `src/etl/fetch_pharmacies.py` (interroge Overpass). Attention aux quotas des services publics.
