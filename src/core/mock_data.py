@@ -15,6 +15,21 @@ class MockConfig:
     seed: int = 42
 
 
+EXCLUDED_PREFIXES = ("97", "98")
+
+
+def _filter_departements(pairs: Sequence[tuple[str, str]] | None) -> list[tuple[str, str]]:
+    if not pairs:
+        return []
+    filtered = []
+    for code, name in pairs:
+        code_str = str(code).strip().upper()
+        if code_str.startswith(EXCLUDED_PREFIXES):
+            continue
+        filtered.append((code_str, name))
+    return filtered
+
+
 def _rng(seed: int) -> random.Random:
     return random.Random(seed)
 
@@ -24,7 +39,7 @@ def build_config(
     weeks: Sequence[str] | None = None,
 ) -> MockConfig:
     default_weeks = ["2024-45", "2024-46", "2024-47", "2024-48", "2024-49"]
-    default_departements = [
+    default_departements = _filter_departements([
         ("01", "Ain"),
         ("02", "Aisne"),
         ("03", "Allier"),
@@ -35,13 +50,13 @@ def build_config(
         ("69", "Rhône"),
         ("75", "Paris"),
         ("83", "Var"),
-        ("971", "Guadeloupe"),
-        ("972", "Martinique"),
-        ("973", "Guyane"),
-    ]
+        ("2A", "Corse-du-Sud"),
+        ("2B", "Haute-Corse"),
+    ])
+    filtered = _filter_departements(departements)
     return MockConfig(
         weeks=weeks or default_weeks,
-        departements=departements or default_departements,
+        departements=filtered or default_departements,
         seed=42,
     )
 

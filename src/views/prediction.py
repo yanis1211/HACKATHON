@@ -25,10 +25,18 @@ def render_map(prediction: PredictionResult, geojson: dict) -> None:
     metric = "couverture_mois" if layer_choice.startswith("Couverture") else "besoin_prevu"
     title = "Couverture vaccinale (%)" if metric == "couverture_mois" else "Besoin prédit (doses)"
 
+    df = df.copy()
+    if "is_future" in df.columns:
+        df.loc[df["is_future"], "nom"] = df.loc[df["is_future"], "nom"] + " (prévision)"
+
     fig = choropleth_map(df, geojson, metric, title, palette="YlGnBu" if metric == "couverture_mois" else "YlOrRd")
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    st.caption("Comment lire : vert ≥ 75 %, orange 60–75 %, rouge < 60 %. Survolez un département pour voir besoin, flux et tendance.")
+    st.markdown(
+        "- **Comment lire :** vert ≥ 75 %, orange 60–75 %, rouge < 60 %.\n"
+        "- **Hypothèse :** besoin basé sur couverture cible et signaux IAS.\n"
+        "- **Action :** cibler les départements rouges avant la prochaine campagne."
+    )
 
 
 def render_forecast_view(prediction: PredictionResult) -> None:
@@ -117,9 +125,10 @@ def render_forecast_view(prediction: PredictionResult) -> None:
     national_fig.update_layout(height=280, hovermode="x unified")
     st.plotly_chart(national_fig, use_container_width=True, config={"displayModeBar": False})
 
-    st.caption(
-        "Comment lire : courbe bleue = besoin en vaccins (doses), courbe rouge = flux patients. "
-        "Hypothèses : moyenne mobile 3 mois, IAS k = {:.2f}, uplift hiver {} %. Action : planifier les doses et renforts avant l’hiver.".format(
+    st.markdown(
+        "- **Comment lire :** la courbe bleue représente le besoin estimé en doses, la courbe rouge les flux patients.\n"
+        "- **Hypothèses :** moyenne mobile 3 mois, IAS k = {:.2f}, uplift hiver {} %.\n"
+        "- **Action :** ajuster campagnes et ressources avant les pics hivernaux.".format(
             prediction.ias_coef,
             prediction.season_uplift_pct,
         )
